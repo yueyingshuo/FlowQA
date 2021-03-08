@@ -12,30 +12,31 @@ import torch
 import msgpack
 import pandas as pd
 import numpy as np
-from QA_model.model_QuAC import QAModel
-from general_utils import find_best_score_and_thresh, BatchGen_QuAC
+from QA_model.model_CoQA import QAModel
+from CoQA_eval import CoQAEvaluator
+from general_utils import find_best_score_and_thresh, BatchGen_CoQA
 
 parser = argparse.ArgumentParser(
     description='Train a Dialog QA model.'
 )
 
 # system
-parser.add_argument('--task_name', default='QuAC')
+parser.add_argument('--task_name', default='CoQA')
 parser.add_argument('--name', default='', help='additional name of the current run')
 parser.add_argument('--log_file', default='output.log',
                     help='path for log file.')
 parser.add_argument('--log_per_updates', type=int, default=20,
                     help='log model loss per x updates (mini-batches).')
 
-parser.add_argument('--train_dir', default='QuAC_data/')
-parser.add_argument('--dev_dir', default='QuAC_data/')
-parser.add_argument('--answer_type_num', type=int, default=1)
+parser.add_argument('--train_dir', default='/home/yueying/pycharm_workspace/FlowQA/CoQA/')
+parser.add_argument('--dev_dir', default='/home/yueying/pycharm_workspace/FlowQA/CoQA/')
+parser.add_argument('--answer_type_num', type=int, default=4)
 
 parser.add_argument('--model_dir', default='models',
                     help='path to store saved models.')
 parser.add_argument('--eval_per_epoch', type=int, default=1,
                     help='perform evaluation per x epoches.')
-parser.add_argument('--MTLSTM_path', default='glove/MT-LSTM.pth')
+parser.add_argument('--MTLSTM_path', default='/home/yueying/pycharm_workspace/FlowQA/glove/MT-LSTM.pth')
 parser.add_argument('--save_all', dest='save_best_only', action='store_false', help='save all models.')
 parser.add_argument('--do_not_save', action='store_true', help='don\'t save any model')
 parser.add_argument('--save_for_predict', action='store_true')
@@ -49,7 +50,7 @@ parser.add_argument('-bs', '--batch_size', type=int, default=1)
 parser.add_argument('-ebs', '--elmo_batch_size', type=int, default=12)
 parser.add_argument('-rs', '--resume', default='',
                     help='previous model pathname. '
-                         'e.g. "models/checkpoint_epoch_11.pt" models/best_qumodel.pt')
+                         'e.g. "models/checkpoint_epoch_11.pt"')
 parser.add_argument('-ro', '--resume_options', action='store_true',
                     help='use previous model options, ignore the cli and defaults.')
 parser.add_argument('-rlr', '--reduce_lr', type=float, default=0.,
@@ -67,12 +68,12 @@ parser.add_argument('-tp', '--tune_partial', type=int, default=1000,
 parser.add_argument('--fix_embeddings', action='store_true',
                     help='if true, `tune_partial` will be ignored.')
 parser.add_argument('--elmo_lambda', type=float, default=0.0)
+parser.add_argument('--rationale_lambda', type=float, default=0.0)
 parser.add_argument('--no_question_normalize', dest='question_normalize', action='store_false') # when set, do dialog normalize
 parser.add_argument('--pretrain', default='')
 
 # model
-parser.add_argument('--explicit_dialog_ctx', type=int, default=2)
-parser.add_argument('--use_dialog_act', action='store_true')
+parser.add_argument('--explicit_dialog_ctx', type=int, default=1)
 parser.add_argument('--no_dialog_flow', action='store_true')
 parser.add_argument('--no_hierarchical_query', dest='do_hierarchical_query', action='store_false')
 parser.add_argument('--no_prealign', dest='do_prealign', action='store_false')
@@ -91,11 +92,11 @@ parser.add_argument('--rnn_type', default='lstm',
                     help='supported types: rnn, gru, lstm')
 parser.add_argument('--concat_rnn', dest='concat_rnn', action='store_true')
 
-parser.add_argument('--hidden_size', type=int, default=125)
-parser.add_argument('--self_attention_opt', type=int, default=1) # 0: no self attention
-
 parser.add_argument('--deep_inter_att_do_similar', type=int, default=0)
 parser.add_argument('--deep_att_hidden_size_per_abstr', type=int, default=250)
+
+parser.add_argument('--hidden_size', type=int, default=125)
+parser.add_argument('--self_attention_opt', type=int, default=1) # 0: no self attention
 
 parser.add_argument('--no_elmo', dest='use_elmo', action='store_false')
 parser.add_argument('--no_em', action='store_true')
@@ -116,7 +117,14 @@ parser.add_argument('--no_seq_dropout', dest='do_seq_dropout', action='store_fal
 parser.add_argument('--my_dropout_p', type=float, default=0.4)
 parser.add_argument('--dropout_emb', type=float, default=0.4)
 
-parser.add_argument('--max_len', type=int, default=35)
+parser.add_argument('--max_len', type=int, default=15)
+
+parser.add_argument('--flow_attention', action='store_true', help='use flow attention?')
+parser.add_argument('--cof', action='store_true', help='use context of flow?')
+parser.add_argument('--residual_step', action='store_true', help='use residual step?')
+parser.add_argument('--use_hoc', action='store_true', help='use history of context?')
+parser.add_argument('--use_prev_ans', action='store_true', help='whether to use previous answers')
+parser.add_argument('--dry_run', action='store_true', help='check batch data')
 
 args = parser.parse_args()
 
@@ -153,11 +161,13 @@ def main():
     log.info('[program starts.]')
     opt = vars(args) # changing opt will change args
     train, train_embedding, opt = load_train_data(opt)
-    dev, dev_embedding, dev_answer = load_dev_data(opt)
-    opt['num_features'] += args.explicit_dialog_ctx * (args.use_dialog_act*3 + 2) # dialog_act + previous answer
+    dev, dev_embedding = load_dev_data(opt)
+    opt['num_features'] += args.explicit_dialog_ctx * 3 # dialog_act + previous answer
     if opt['use_elmo'] == False:
         opt['elmo_batch_size'] = 0
+    CoQAEval = CoQAEvaluator("/home/yueying/pycharm_workspace/FlowQA/CoQA/dev.json")
     log.info('[Data loaded.]')
+
     if args.resume:
         log.info('[loading previous model...]')
         checkpoint = torch.load(args.resume)
@@ -187,22 +197,31 @@ def main():
         model.cuda()
 
     if args.resume:
-        batches = BatchGen_QuAC(dev, batch_size=args.batch_size, evaluation=True, gpu=args.cuda, dialog_ctx=args.explicit_dialog_ctx, use_dialog_act=args.use_dialog_act)
-        predictions, no_ans_scores = [], []
+        batches = BatchGen_CoQA(dev, batch_size=args.batch_size, evaluation=True, gpu=args.cuda, dialog_ctx=args.explicit_dialog_ctx)
+        predictions = []
         for batch in batches:
             phrases, noans = model.predict(batch)
             predictions.extend(phrases)
-            no_ans_scores.extend(noans)
-        f1, na, thresh = find_best_score_and_thresh(predictions, dev_answer, no_ans_scores)
-        log.info("[dev F1: {} NA: {} TH: {}]".format(f1, na, thresh))
-        best_val_score, best_na, best_thresh = f1, na, thresh
+        f1 = CoQAEval.compute_turn_score_seq(predictions)
+        log.info("[dev F1: {:.3f}]".format(f1))
+        best_val_score = f1
     else:
-        best_val_score, best_na, best_thresh = 0.0, 0.0, 0.0
+        best_val_score = 0.0
+    
+    if args.dry_run:
+        batches = BatchGen_CoQA(train, batch_size=args.batch_size, gpu=args.cuda, dialog_ctx=args.explicit_dialog_ctx, precompute_elmo=args.elmo_batch_size // args.batch_size)
+        for i, batch in enumerate(batches):
+            x2 = batch[6]
+            batch_size = x2.size(0)
+            q_num = x2.size(1)
+        return
 
+    
     for epoch in range(epoch_0, epoch_0 + args.epoches):
         log.warning('Epoch {}'.format(epoch))
+
         # train
-        batches = BatchGen_QuAC(train, batch_size=args.batch_size, gpu=args.cuda, dialog_ctx=args.explicit_dialog_ctx, use_dialog_act=args.use_dialog_act, precompute_elmo=args.elmo_batch_size // args.batch_size)
+        batches = BatchGen_CoQA(train, batch_size=args.batch_size, gpu=args.cuda, dialog_ctx=args.explicit_dialog_ctx, precompute_elmo=args.elmo_batch_size // args.batch_size)
         start = datetime.now()
         for i, batch in enumerate(batches):
             model.update(batch)
@@ -210,34 +229,34 @@ def main():
                 log.info('updates[{0:6}] train loss[{1:.5f}] remaining[{2}]'.format(
                     model.updates, model.train_loss.avg,
                     str((datetime.now() - start) / (i + 1) * (len(batches) - i - 1)).split('.')[0]))
-        
+
         # eval
         if epoch % args.eval_per_epoch == 0:
-            batches = BatchGen_QuAC(dev, batch_size=args.batch_size, evaluation=True, gpu=args.cuda, dialog_ctx=args.explicit_dialog_ctx, use_dialog_act=args.use_dialog_act, precompute_elmo=args.elmo_batch_size // args.batch_size)
-            predictions, no_ans_scores = [], []
-            for batch in batches:
-                phrases, noans = model.predict(batch)
-                predictions.extend(phrases)
-                no_ans_scores.extend(noans)
-            f1, na, thresh = find_best_score_and_thresh(predictions, dev_answer, no_ans_scores)
+            with torch.no_grad():
+                batches = BatchGen_CoQA(dev, batch_size=args.batch_size, evaluation=True, gpu=args.cuda, dialog_ctx=args.explicit_dialog_ctx, precompute_elmo=args.elmo_batch_size // args.batch_size)
+                predictions = []
+                for batch in batches:
+                    phrases = model.predict(batch)
+                    predictions.extend(phrases)
+                f1 = CoQAEval.compute_turn_score_seq(predictions)
 
         # save
         if args.save_best_only:
             if f1 > best_val_score:
-                best_val_score, best_na, best_thresh = f1, na, thresh
-                model_file = os.path.join(model_dir, 'best_qu_model.pt')
+                best_val_score = f1
+                model_file = os.path.join(model_dir, 'best_model.pt')
                 model.save(model_file, epoch)
                 log.info('[new best model saved.]')
         else:
             model_file = os.path.join(model_dir, 'checkpoint_epoch_{}.pt'.format(epoch))
             model.save(model_file, epoch)
             if f1 > best_val_score:
-                best_val_score, best_na, best_thresh = f1, na, thresh
+                best_val_score = f1
                 copyfile(os.path.join(model_dir, model_file),
                          os.path.join(model_dir, 'best_model.pt'))
                 log.info('[new best model saved.]')
 
-        log.warning("Epoch {} - dev F1: {:.3f} NA: {:.3f} TH: {:.3f} (best F1: {:.3f} NA: {:.3f} TH: {:.3f})".format(epoch, f1, na, thresh, best_val_score, best_na, best_thresh))
+        log.warning("Epoch {} - dev F1: {:.3f} (Best F1: {:.3f})".format(epoch, f1 * 100.0, best_val_score * 100.0))
 
 def lr_decay(optimizer, lr_decay):
     for param_group in optimizer.param_groups:
@@ -246,13 +265,13 @@ def lr_decay(optimizer, lr_decay):
     return optimizer
 
 def load_train_data(opt):
-    with open(os.path.join(args.train_dir, 'train_meta_1.msgpack'), 'rb') as f:
+    with open(os.path.join(args.train_dir, 'train_meta.msgpack'), 'rb') as f:
         meta = msgpack.load(f, encoding='utf8')
     embedding = torch.Tensor(meta['embedding'])
     opt['vocab_size'] = embedding.size(0)
     opt['embedding_dim'] = embedding.size(1)
 
-    with open(os.path.join(args.train_dir, 'train_data_1.msgpack'), 'rb') as f:
+    with open(os.path.join(args.train_dir, 'train_data.msgpack'), 'rb') as f:
         data = msgpack.load(f, encoding='utf8')
     #data_orig = pd.read_csv(os.path.join(args.train_dir, 'train.csv'))
 
@@ -272,6 +291,8 @@ def load_train_data(opt):
                         data['context_features'],
                         data['answer_start'],
                         data['answer_end'],
+                        data['rationale_start'],
+                        data['rationale_end'],
                         data['answer_choice'],
                         data['question'],
                         data['answer'],
@@ -280,12 +301,12 @@ def load_train_data(opt):
     return train, embedding, opt
 
 def load_dev_data(opt): # can be extended to true test set
-    with open(os.path.join(args.dev_dir, 'dev_meta_1.msgpack'), 'rb') as f:
+    with open(os.path.join(args.dev_dir, 'dev_meta.msgpack'), 'rb') as f:
         meta = msgpack.load(f, encoding='utf8')
     embedding = torch.Tensor(meta['embedding'])
     assert opt['embedding_dim'] == embedding.size(1)
 
-    with open(os.path.join(args.dev_dir, 'dev_data_1.msgpack'), 'rb') as f:
+    with open(os.path.join(args.dev_dir, 'dev_data.msgpack'), 'rb') as f:
         data = msgpack.load(f, encoding='utf8')
     #data_orig = pd.read_csv(os.path.join(args.dev_dir, 'dev.csv'))
 
@@ -305,20 +326,15 @@ def load_dev_data(opt): # can be extended to true test set
                         data['context_features'],
                         data['answer_start'],
                         data['answer_end'],
+                        data['rationale_start'],
+                        data['rationale_end'],
                         data['answer_choice'],
                         data['question'],
                         data['answer'],
                         data['question_tokenized']))
           }
 
-    dev_answer = []
-    for i, CID in enumerate(data['question_CID']):
-        if len(dev_answer) <= CID:
-            dev_answer.append([])
-        dev_answer[CID].append(data['all_answer'][i])
-    return dev, embedding, dev_answer
-
-
+    return dev, embedding
 
 if __name__ == '__main__':
     main()

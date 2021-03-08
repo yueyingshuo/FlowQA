@@ -15,6 +15,9 @@ import numpy as np
 from QA_model.model_CoQA import QAModel
 from CoQA_eval import CoQAEvaluator
 from general_utils import find_best_score_and_thresh, BatchGen_CoQA
+from tensorboardX import SummaryWriter
+writer = SummaryWriter('runs/scalar_example')
+
 
 parser = argparse.ArgumentParser(
     description='Train a Dialog QA model.'
@@ -200,7 +203,8 @@ def main():
         best_val_score = f1
     else:
         best_val_score = 0.0
-
+    step=0
+    val_step=0
     for epoch in range(epoch_0, epoch_0 + args.epoches):
         log.warning('Epoch {}'.format(epoch))
 
@@ -209,12 +213,14 @@ def main():
         start = datetime.now()
         for i, batch in enumerate(batches):
             model.update(batch)
+            step+=1
+            writer.add_scalar('train_loss', model.train_loss.avg, global_step=step)
             if i % args.log_per_updates == 0:
                 log.info('updates[{0:6}] train loss[{1:.5f}] remaining[{2}]'.format(
                     model.updates, model.train_loss.avg,
                     str((datetime.now() - start) / (i + 1) * (len(batches) - i - 1)).split('.')[0]))
-
         # eval
+        f1=None
         if epoch % args.eval_per_epoch == 0:
             batches = BatchGen_CoQA(dev, batch_size=args.batch_size, evaluation=True, gpu=args.cuda, dialog_ctx=args.explicit_dialog_ctx, precompute_elmo=args.elmo_batch_size // args.batch_size)
             predictions = []
@@ -222,6 +228,8 @@ def main():
                 phrases = model.predict(batch)
                 predictions.extend(phrases)
             f1 = CoQAEval.compute_turn_score_seq(predictions)
+            print("f1:{0}".format(f1))
+            writer.add_scalar('f1', f1, global_step=step)
 
         # save
         if args.save_best_only:

@@ -201,7 +201,7 @@ def token2id(docs, vocab, unk_id=None):
 #===========================================================================
 
 class BatchGen_CoQA:
-    def __init__(self, data, batch_size, gpu, dialog_ctx=0, evaluation=False, context_maxlen=100000, precompute_elmo=0):
+    def __init__(self, data, batch_size, gpu, dialog_ctx=0, evaluation=False, context_maxlen=100000, precompute_elmo=0, yn_augment=0):
         '''
         input:
             data - see train.py
@@ -211,6 +211,7 @@ class BatchGen_CoQA:
         self.batch_size = batch_size
         self.context_maxlen = context_maxlen
         self.precompute_elmo = precompute_elmo
+        self.yn_augment = yn_augment
 
         self.eval = evaluation
         self.gpu = gpu
@@ -330,6 +331,7 @@ class BatchGen_CoQA:
             answer_c = torch.LongTensor(batch_size, question_num).fill_(0)
             overall_mask = torch.ByteTensor(batch_size, question_num).fill_(0)
             question, answer = [], []
+            answer_len = 0
             for i, q_seq in enumerate(question_batch):
                 question_pack, answer_pack = [], []
                 for j, id in enumerate(q_seq):
@@ -337,9 +339,15 @@ class BatchGen_CoQA:
                     overall_mask[i, j] = 1
                     question_pack.append(qa_data[id][8])
                     answer_pack.append(qa_data[id][9])
+                    answer_len = max(answer_len, answer_e[i, j] - answer_s[i, j] + 1)
                 question.append(question_pack)
                 answer.append(answer_pack)
-
+            
+            answer_id = torch.LongTensor(batch_size, question_num, answer_len).fill_(0) 
+            for i, q_seq in enumerate(question_batch):
+                for j, id in enumerate(q_seq):
+                    ans_in_doc = context_id[i, answer_s[i, j]:answer_e[i, j] + 1]
+                    answer_id[i, j, :len(ans_in_doc)] = torch.LongTensor(ans_in_doc)
             # Process Masks
             context_mask = torch.eq(context_id, 0)
             question_mask = torch.eq(question_id, 0)
@@ -355,6 +363,7 @@ class BatchGen_CoQA:
                 context_mask = context_mask.pin_memory()
                 question_id = question_id.pin_memory()
                 question_mask = question_mask.pin_memory()
+                answer_id = answer_id.pin_memory()
                 answer_s = answer_s.pin_memory()
                 answer_e = answer_e.pin_memory()
                 rationale_s = rationale_s.pin_memory()
@@ -540,23 +549,6 @@ class BatchGen_QuAC:
                    answer_s, answer_e, answer_c,
                    text, span, question, answer)
 
-# context_id 0
-# context_cid 1
-# context_feature 2
-# context_tag, 3
-# context_ent, 4
-# context_mask,5
-# question_id 6
-# question_cid 7
-# question_mask 8
-# overall_mask 9
-# answer_s 10
-# answer_e 11
-# answer_c 12
-# text 13
-# span 14
-# question 15
-# answer 16
 #===========================================================================
 #========================== For QuAC evaluation ============================
 #===========================================================================
@@ -644,6 +636,13 @@ def leave_one_out_max(prediction, ground_truths):
         return 1.0 * sum(t_f1) / len(t_f1)
 
 def find_best_score_and_thresh(pred, truth, no_ans_score, min_F1=0.4):
+    '''
+    Return:
+        F1: f1_score
+        NA: upper bound of f1_score considering NA
+        best_thresh: best threshold
+    '''
+    # flatten
     pred = [p for dialog_p in pred for p in dialog_p]
     truth = [t for dialog_t in truth for t in dialog_t]
     no_ans_score = [n for dialog_n in no_ans_score for n in dialog_n]
@@ -653,6 +652,7 @@ def find_best_score_and_thresh(pred, truth, no_ans_score, min_F1=0.4):
     all_f1 = []
     for p, t, n in zip(pred, truth, no_ans_score):
         clean_t = handle_cannot(t)
+        # compute human performance
         human_F1 = leave_one_out(clean_t)
         if human_F1 < min_F1: continue
 
@@ -665,6 +665,7 @@ def find_best_score_and_thresh(pred, truth, no_ans_score, min_F1=0.4):
     best_thresh = max(clean_noans) + 1
 
     cur_noans, best_noans, noans_cnt = 0, 0, 0
+    # sort idx according to score
     sort_idx = sorted(range(len(clean_noans)), key=lambda k: clean_noans[k], reverse=True)
     for i in sort_idx:
         if clean_truth[i] == ['CANNOTANSWER']:

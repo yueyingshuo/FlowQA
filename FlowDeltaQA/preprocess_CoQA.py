@@ -11,10 +11,10 @@ import multiprocessing
 import logging
 import random
 from allennlp.modules.elmo import batch_to_ids
-from general_utils import flatten_json, normalize_text, build_embedding, load_glove_vocab, pre_proc, get_context_span, find_answer_span, feature_gen, token2id
+from general_utils import flatten_json, free_text_to_span, normalize_text, build_embedding, load_glove_vocab, pre_proc, get_context_span, find_answer_span, feature_gen, token2id
 
 parser = argparse.ArgumentParser(
-    description='Preprocessing train + dev files, about 20 minutes to run on Servers.'
+    description='Preprocessing train + dev files, about 15 minutes to run on Servers.'
 )
 parser.add_argument('--wv_file', default='glove/glove.840B.300d.txt',
                     help='path to word vector file.')
@@ -30,13 +30,12 @@ parser.add_argument('--no_match', action='store_true',
 parser.add_argument('--seed', type=int, default=1023,
                     help='random seed for data shuffling, embedding init, etc.')
 
-
 args = parser.parse_args()
-trn_file = 'QuAC_data/train.json'
-dev_file = 'QuAC_data/dev.json'
+trn_file = 'CoQA/train.json'
+dev_file = 'CoQA/dev.json'
 wv_file = args.wv_file
 wv_dim = args.wv_dim
-nlp = spacy.load('en_core_web_sm', disable=['parser'])
+nlp = spacy.load('en', disable=['parser'])
 
 random.seed(args.seed)
 np.random.seed(args.seed)
@@ -56,44 +55,43 @@ log.info('glove loaded.')
 
 def proc_train(ith, article):
     rows = []
-    
-    for paragraph in article['paragraphs']:
-        context = paragraph['context']
-        for qa in paragraph['qas']:
-            question = qa['question']
-            answers = qa['orig_answer']
-            
-            answer = answers['text']
-            answer_start = answers['answer_start']
-            answer_end = answers['answer_start'] + len(answers['text'])
-            answer_choice = 0 if answer == 'CANNOTANSWER' else\
-                            1 if qa['yesno'] == 'y' else\
-                            2 if qa['yesno'] == 'n' else\
-                            3 # Not a yes/no question
-            if answer_choice != 0:
-                """
-                0: Do not ask a follow up question!
-                1: Definitely ask a follow up question!
-                2: Not too important, but you can ask a follow up.
-                """
-                answer_choice += 10 * (0 if qa['followup'] == "n" else\
-                                       1 if qa['followup'] == "y" else\
-                                       2)
-            else:
-                answer_start, answer_end = -1, -1
-            rows.append((ith, question, answer, answer_start, answer_end, answer_choice))
+    context = article['story']
+
+    for j, (question, answers) in enumerate(zip(article['questions'], article['answers'])):
+        gold_answer = answers['input_text']
+        span_answer = answers['span_text']
+
+        answer, char_i, char_j = free_text_to_span(gold_answer, span_answer)
+        answer_choice = 0 if answer == '__NA__' else\
+                        1 if answer == '__YES__' else\
+                        2 if answer == '__NO__' else\
+                        3 # Not a yes/no question
+
+        if answer_choice == 3:
+            answer_start = answers['span_start'] + char_i
+            answer_end = answers['span_start'] + char_j
+        else:
+            answer_start, answer_end = -1, -1
+
+        rationale = answers['span_text']
+        rationale_start = answers['span_start']
+        rationale_end = answers['span_end']
+
+        q_text = question['input_text']
+        if j > 0:
+            q_text = article['answers'][j-1]['input_text'] + " // " + q_text
+
+        rows.append((ith, q_text, answer, answer_start, answer_end, rationale, rationale_start, rationale_end, answer_choice))
     return rows, context
 
 train, train_context = flatten_json(trn_file, proc_train)
-train = pd.DataFrame(train, columns=['context_idx', 'question', 'answer',
-                                    'answer_start', 'answer_end', 'answer_choice'])
+train = pd.DataFrame(train, columns=['context_idx', 'question', 'answer', 'answer_start', 'answer_end', 'rationale', 'rationale_start', 'rationale_end', 'answer_choice'])
 log.info('train json data flattened.')
 
 print(train)
 
 trC_iter = (pre_proc(c) for c in train_context)
-#trQ_iter = (pre_proc(q) for q in train.question)
-trQ_iter = (pre_proc(q) for q in train.answer)
+trQ_iter = (pre_proc(q) for q in train.question)
 trC_docs = [doc for doc in nlp.pipe(trC_iter, batch_size=64, n_threads=args.threads)]
 trQ_docs = [doc for doc in nlp.pipe(trQ_iter, batch_size=64, n_threads=args.threads)]
 
@@ -111,7 +109,15 @@ for ans_st, ans_end, idx in zip(train.answer_start, train.answer_end, train.cont
     ans_st_token_ls.append(ans_st_token)
     ans_end_token_ls.append(ans_end_token)
 
+ration_st_token_ls, ration_end_token_ls = [], []
+for ration_st, ration_end, idx in zip(train.rationale_start, train.rationale_end, train.context_idx):
+    ration_st_token, ration_end_token = find_answer_span(train_context_span[idx], ration_st, ration_end)
+    ration_st_token_ls.append(ration_st_token)
+    ration_end_token_ls.append(ration_end_token)
+
 train['answer_start_token'], train['answer_end_token'] = ans_st_token_ls, ans_end_token_ls
+train['rationale_start_token'], train['rationale_end_token'] = ration_st_token_ls, ration_end_token_ls
+
 initial_len = len(train)
 train.dropna(inplace=True) # modify self DataFrame
 log.info('drop {0}/{1} inconsistent samples.'.format(initial_len - len(train), initial_len))
@@ -163,14 +169,11 @@ log.info('vocabulary for training is built.')
 tr_embedding = build_embedding(wv_file, tr_vocab, wv_dim)
 log.info('got embedding matrix for training.')
 
-# don't store row name in csv
-#train.to_csv('QuAC_data/train.csv', index=False, encoding='utf8')
-
 meta = {
     'vocab': tr_vocab,
     'embedding': tr_embedding.tolist()
 }
-with open('QuAC_data/train_meta_1.msgpack', 'wb') as f:
+with open('CoQA/train_meta.msgpack', 'wb') as f:
     msgpack.dump(meta, f)
 
 prev_CID, first_question = -1, []
@@ -193,11 +196,13 @@ result = {
     'answer': train.answer.tolist(),
     'answer_start': train.answer_start_token.tolist(),
     'answer_end': train.answer_end_token.tolist(),
+    'rationale_start': train.rationale_start_token.tolist(),
+    'rationale_end': train.rationale_end_token.tolist(),
     'answer_choice': train.answer_choice.tolist(),
     'context_tokenized': trC_tokens,
     'question_tokenized': trQ_tokens
 }
-with open('QuAC_data/train_data_1.msgpack', 'wb') as f:
+with open('CoQA/train_data.msgpack', 'wb') as f:
     msgpack.dump(result, f)
 
 log.info('saved training to disk.')
@@ -208,49 +213,43 @@ log.info('saved training to disk.')
 
 def proc_dev(ith, article):
     rows = []
-    
-    for paragraph in article['paragraphs']:
-        context = paragraph['context']
-        for qa in paragraph['qas']:
-            question = qa['question']
-            answers = qa['orig_answer']
-            
-            answer = answers['text']
-            answer_start = answers['answer_start']
-            answer_end = answers['answer_start'] + len(answers['text'])
-            answer_choice = 0 if answer == 'CANNOTANSWER' else\
-                            1 if qa['yesno'] == 'y' else\
-                            2 if qa['yesno'] == 'n' else\
-                            3 # Not a yes/no question
-            if answer_choice != 0:
-                """
-                0: Do not ask a follow up question!
-                1: Definitely ask a follow up question!
-                2: Not too important, but you can ask a follow up.
-                """
-                answer_choice += 10 * (0 if qa['followup'] == "n" else\
-                                       1 if qa['followup'] == "y" else\
-                                       2)
-            else:
-                answer_start, answer_end = -1, -1
-            
-            ans_ls = []
-            for ans in qa['answers']:
-                ans_ls.append(ans['text'])
-            
-            rows.append((ith, question, answer, answer_start, answer_end, answer_choice, ans_ls))
+    context = article['story']
+
+    for j, (question, answers) in enumerate(zip(article['questions'], article['answers'])):
+        gold_answer = answers['input_text']
+        span_answer = answers['span_text']
+
+        answer, char_i, char_j = free_text_to_span(gold_answer, span_answer)
+        answer_choice = 0 if answer == '__NA__' else\
+                        1 if answer == '__YES__' else\
+                        2 if answer == '__NO__' else\
+                        3 # Not a yes/no question
+
+        if answer_choice == 3:
+            answer_start = answers['span_start'] + char_i
+            answer_end = answers['span_start'] + char_j
+        else:
+            answer_start, answer_end = -1, -1
+
+        rationale = answers['span_text']
+        rationale_start = answers['span_start']
+        rationale_end = answers['span_end']
+
+        q_text = question['input_text']
+        if j > 0:
+            q_text = article['answers'][j-1]['input_text'] + " // " + q_text
+
+        rows.append((ith, q_text, answer, answer_start, answer_end, rationale, rationale_start, rationale_end, answer_choice))
     return rows, context
 
 dev, dev_context = flatten_json(dev_file, proc_dev)
-dev = pd.DataFrame(dev, columns=['context_idx', 'question', 'answer',
-                                 'answer_start', 'answer_end', 'answer_choice', 'all_answer'])
+dev = pd.DataFrame(dev, columns=['context_idx', 'question', 'answer', 'answer_start', 'answer_end', 'rationale', 'rationale_start', 'rationale_end', 'answer_choice'])
 log.info('dev json data flattened.')
 
 print(dev)
 
 devC_iter = (pre_proc(c) for c in dev_context)
-devQ_iter = (pre_proc(q) for q in dev.answer)
-# devQ_iter = (pre_proc(q) for q in dev.question)
+devQ_iter = (pre_proc(q) for q in dev.question)
 devC_docs = [doc for doc in nlp.pipe(
     devC_iter, batch_size=64, n_threads=args.threads)]
 devQ_docs = [doc for doc in nlp.pipe(
@@ -271,7 +270,15 @@ for ans_st, ans_end, idx in zip(dev.answer_start, dev.answer_end, dev.context_id
     ans_st_token_ls.append(ans_st_token)
     ans_end_token_ls.append(ans_end_token)
 
+ration_st_token_ls, ration_end_token_ls = [], []
+for ration_st, ration_end, idx in zip(dev.rationale_start, dev.rationale_end, dev.context_idx):
+    ration_st_token, ration_end_token = find_answer_span(dev_context_span[idx], ration_st, ration_end)
+    ration_st_token_ls.append(ration_st_token)
+    ration_end_token_ls.append(ration_end_token)
+
 dev['answer_start_token'], dev['answer_end_token'] = ans_st_token_ls, ans_end_token_ls
+dev['rationale_start_token'], dev['rationale_end_token'] = ration_st_token_ls, ration_end_token_ls
+
 initial_len = len(dev)
 dev.dropna(inplace=True) # modify self DataFrame
 log.info('drop {0}/{1} inconsistent samples.'.format(initial_len - len(dev), initial_len))
@@ -298,7 +305,6 @@ print(devQ_ids[:10])
 # tags
 devC_tag_ids = token2id(devC_tags, vocab_tag) # vocab_tag same as training
 # entities
-
 devC_ent_ids = token2id(devC_ents, vocab_ent, unk_id=0) # vocab_ent same as training
 log.info('vocabulary for dev is built.')
 
@@ -313,7 +319,7 @@ meta = {
     'vocab': dev_vocab,
     'embedding': dev_embedding.tolist()
 }
-with open('QuAC_data/dev_meta_1.msgpack', 'wb') as f:
+with open('CoQA/dev_meta.msgpack', 'wb') as f:
     msgpack.dump(meta, f)
 
 prev_CID, first_question = -1, []
@@ -325,7 +331,7 @@ for i, CID in enumerate(dev.context_idx):
 result = {
     'question_ids': devQ_ids,
     'context_ids': devC_ids,
-    'context_features': devC_features,
+    'context_features': devC_features, # exact match, tf
     'context_tags': devC_tag_ids, # POS tagging
     'context_ents': devC_ent_ids, # Entity recognition
     'context': dev_context,
@@ -336,12 +342,13 @@ result = {
     'answer': dev.answer.tolist(),
     'answer_start': dev.answer_start_token.tolist(),
     'answer_end': dev.answer_end_token.tolist(),
+    'rationale_start': dev.rationale_start_token.tolist(),
+    'rationale_end': dev.rationale_end_token.tolist(),
     'answer_choice': dev.answer_choice.tolist(),
-    'all_answer': dev.all_answer.tolist(),
     'context_tokenized': devC_tokens,
     'question_tokenized': devQ_tokens
 }
-with open('QuAC_data/dev_data_1.msgpack', 'wb') as f:
+with open('CoQA/dev_data.msgpack', 'wb') as f:
     msgpack.dump(result, f)
 
 log.info('saved dev to disk.')

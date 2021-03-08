@@ -12,6 +12,36 @@ from .detail_model import FlowQA
 
 logger = logging.getLogger(__name__)
 
+def copy_optimizer_params_to_model(named_params_model, named_params_optimizer):
+    """ Utility function for optimize_on_cpu and 16-bits training.
+        Copy the parameters optimized on CPU/RAM back to the model on GPU
+    """
+    named_params_model = [(n, p) for n, p in named_params_model if p.requires_grad]
+    for (name_opti, param_opti), (name_model, param_model) in zip(named_params_optimizer, named_params_model):
+        if name_opti != name_model:
+            logger.error("name_opti != name_model: {} {}".format(name_opti, name_model))
+            raise ValueError
+        param_model.data.copy_(param_opti.data)
+
+def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_nan=False):
+    """ Utility function for optimize_on_cpu and 16-bits training.
+        Copy the gradient of the GPU parameters to the CPU/RAMM copy of the model
+    """
+    is_nan = False
+    named_params_model = [(n, p) for n, p in named_params_model if p.requires_grad]
+    for (name_opti, param_opti), (name_model, param_model) in zip(named_params_optimizer, named_params_model):
+        if name_opti != name_model:
+            logger.error("name_opti != name_model: {} {}".format(name_opti, name_model))
+            raise ValueError
+        if param_model.grad is not None:
+            if test_nan and torch.isnan(param_model.grad).sum() > 0:
+                is_nan = True
+            if param_opti.grad is None:
+                param_opti.grad = torch.nn.Parameter(param_opti.data.new().resize_(*param_opti.data.size()))
+            param_opti.grad.data.copy_(param_model.grad.data)
+        else:
+            param_opti.grad = None
+    return is_nan
 
 class QAModel(object):
     """
@@ -36,7 +66,14 @@ class QAModel(object):
             self.network.load_state_dict(state_dict['network'])
 
         # Building optimizer.
-        parameters = [p for p in self.network.parameters() if p.requires_grad]
+        if opt['optimize_on_cpu']:
+            self.param_optimizer = [(n, param.clone().detach().to('cpu').requires_grad_()) \
+                                for n, param in self.network.named_parameters() if param.requires_grad]
+            parameters = [p for n, p in self.param_optimizer]
+        else:
+            parameters = [p for p in self.network.parameters() if p.requires_grad]
+        self.parameters = parameters 
+
         if opt['optimizer'] == 'sgd':
             self.optimizer = optim.SGD(parameters, opt['learning_rate'],
                                        momentum=opt['momentum'],
@@ -80,7 +117,6 @@ class QAModel(object):
 
         # Run forward
         # output: [batch_size, question_num, context_len], [batch_size, question_num]
-
         score_s, score_e, score_no_answ = self.network(*inputs)
 
         # Compute loss and accuracies
@@ -112,15 +148,23 @@ class QAModel(object):
         self.train_loss.update(loss.item(), overall_mask.size(0))
 
         # Clear gradients and run backward
-        self.optimizer.zero_grad()
+        if self.opt['optimize_on_cpu']:
+            self.network.zero_grad()
+        else:
+            self.optimizer.zero_grad()
         loss.backward()
 
         # Clip gradients
-        torch.nn.utils.clip_grad_norm_(self.network.parameters(),
+        torch.nn.utils.clip_grad_norm_(self.parameters,
                                        self.opt['grad_clipping'])
 
         # Update parameters
-        self.optimizer.step()
+        if self.opt['optimize_on_cpu']:
+            set_optimizer_params_grad(self.param_optimizer, self.network.named_parameters(), test_nan=True)
+            self.optimizer.step()
+            copy_optimizer_params_to_model(self.network.named_parameters(), self.param_optimizer)
+        else:
+            self.optimizer.step()
         self.updates += 1
 
         # Reset any partially fixed parameters (e.g. rare words)

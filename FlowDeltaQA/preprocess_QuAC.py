@@ -36,7 +36,7 @@ trn_file = 'QuAC_data/train.json'
 dev_file = 'QuAC_data/dev.json'
 wv_file = args.wv_file
 wv_dim = args.wv_dim
-nlp = spacy.load('en_core_web_sm', disable=['parser'])
+nlp = spacy.load('en', disable=['parser'])
 
 random.seed(args.seed)
 np.random.seed(args.seed)
@@ -92,8 +92,7 @@ log.info('train json data flattened.')
 print(train)
 
 trC_iter = (pre_proc(c) for c in train_context)
-#trQ_iter = (pre_proc(q) for q in train.question)
-trQ_iter = (pre_proc(q) for q in train.answer)
+trQ_iter = (pre_proc(q) for q in train.question)
 trC_docs = [doc for doc in nlp.pipe(trC_iter, batch_size=64, n_threads=args.threads)]
 trQ_docs = [doc for doc in nlp.pipe(trQ_iter, batch_size=64, n_threads=args.threads)]
 
@@ -170,7 +169,7 @@ meta = {
     'vocab': tr_vocab,
     'embedding': tr_embedding.tolist()
 }
-with open('QuAC_data/train_meta_1.msgpack', 'wb') as f:
+with open('QuAC_data/train_meta.msgpack', 'wb') as f:
     msgpack.dump(meta, f)
 
 prev_CID, first_question = -1, []
@@ -197,7 +196,7 @@ result = {
     'context_tokenized': trC_tokens,
     'question_tokenized': trQ_tokens
 }
-with open('QuAC_data/train_data_1.msgpack', 'wb') as f:
+with open('QuAC_data/train_data.msgpack', 'wb') as f:
     msgpack.dump(result, f)
 
 log.info('saved training to disk.')
@@ -249,8 +248,7 @@ log.info('dev json data flattened.')
 print(dev)
 
 devC_iter = (pre_proc(c) for c in dev_context)
-devQ_iter = (pre_proc(q) for q in dev.answer)
-# devQ_iter = (pre_proc(q) for q in dev.question)
+devQ_iter = (pre_proc(q) for q in dev.question)
 devC_docs = [doc for doc in nlp.pipe(
     devC_iter, batch_size=64, n_threads=args.threads)]
 devQ_docs = [doc for doc in nlp.pipe(
@@ -298,7 +296,6 @@ print(devQ_ids[:10])
 # tags
 devC_tag_ids = token2id(devC_tags, vocab_tag) # vocab_tag same as training
 # entities
-
 devC_ent_ids = token2id(devC_ents, vocab_ent, unk_id=0) # vocab_ent same as training
 log.info('vocabulary for dev is built.')
 
@@ -313,7 +310,7 @@ meta = {
     'vocab': dev_vocab,
     'embedding': dev_embedding.tolist()
 }
-with open('QuAC_data/dev_meta_1.msgpack', 'wb') as f:
+with open('QuAC_data/dev_meta.msgpack', 'wb') as f:
     msgpack.dump(meta, f)
 
 prev_CID, first_question = -1, []
@@ -325,7 +322,7 @@ for i, CID in enumerate(dev.context_idx):
 result = {
     'question_ids': devQ_ids,
     'context_ids': devC_ids,
-    'context_features': devC_features,
+    'context_features': devC_features, # exact match, tf
     'context_tags': devC_tag_ids, # POS tagging
     'context_ents': devC_ent_ids, # Entity recognition
     'context': dev_context,
@@ -341,7 +338,7 @@ result = {
     'context_tokenized': devC_tokens,
     'question_tokenized': devQ_tokens
 }
-with open('QuAC_data/dev_data_1.msgpack', 'wb') as f:
+with open('QuAC_data/dev_data.msgpack', 'wb') as f:
     msgpack.dump(result, f)
 
 log.info('saved dev to disk.')

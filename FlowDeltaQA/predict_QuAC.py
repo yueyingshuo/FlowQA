@@ -20,12 +20,12 @@ from general_utils import score, BatchGen_QuAC, find_best_score_and_thresh
 parser = argparse.ArgumentParser(
     description='Predict using a Dialog QA model.'
 )
-parser.add_argument('--dev_dir', default='QuAC_data/')
+parser.add_argument('--dev_dir', default='/home/yueying/pycharm_workspace/FlowQA/QuAC_data/')
 
 parser.add_argument('-o', '--output_dir', default='pred_out/')
 parser.add_argument('--number', type=int, default=-1, help='id of the current prediction')
-parser.add_argument('-m', '--model', default='models/best_model.pt',
-                    help='testing model pathname, e.g. "models/best_model.pt"')
+parser.add_argument('-m', '--model', default='/home/yueying/pycharm_workspace/FlowQA/FlowDeltaQA/models/best_model.pt',
+                    help='testing model pathname, e.g. "models/checkpoint_epoch_11.pt"')
 
 parser.add_argument('-bs', '--batch_size', type=int, default=4)
 parser.add_argument('--no_ans', type=float, default=0)

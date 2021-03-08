@@ -27,16 +27,17 @@ parser.add_argument('--log_file', default='output.log',
 parser.add_argument('--log_per_updates', type=int, default=20,
                     help='log model loss per x updates (mini-batches).')
 
-parser.add_argument('--train_dir', default='QuAC_data/')
-parser.add_argument('--dev_dir', default='QuAC_data/')
+parser.add_argument('--train_dir', default='/home/yueying/pycharm_workspace/FlowQA/QuAC_data/')
+parser.add_argument('--dev_dir', default='/home/yueying/pycharm_workspace/FlowQA/QuAC_data/')
 parser.add_argument('--answer_type_num', type=int, default=1)
 
 parser.add_argument('--model_dir', default='models',
                     help='path to store saved models.')
 parser.add_argument('--eval_per_epoch', type=int, default=1,
                     help='perform evaluation per x epoches.')
-parser.add_argument('--MTLSTM_path', default='glove/MT-LSTM.pth')
-parser.add_argument('--save_all', dest='save_best_only', action='store_false', help='save all models.')
+parser.add_argument('--MTLSTM_path', default='/home/yueying/pycharm_workspace/FlowQA/glove/MT-LSTM.pth')
+parser.add_argument('--save_all',  'save_best_only',action='store_false', help='save all models.')
+#dest='save_best_only',
 parser.add_argument('--do_not_save', action='store_true', help='don\'t save any model')
 parser.add_argument('--save_for_predict', action='store_true')
 parser.add_argument('--seed', type=int, default=1023,
@@ -45,11 +46,11 @@ parser.add_argument('--cuda', type=bool, default=torch.cuda.is_available(),
                     help='whether to use GPU acceleration.')
 # training
 parser.add_argument('-e', '--epoches', type=int, default=30)
-parser.add_argument('-bs', '--batch_size', type=int, default=1)
+parser.add_argument('-bs', '--batch_size', type=int, default=2)
 parser.add_argument('-ebs', '--elmo_batch_size', type=int, default=12)
 parser.add_argument('-rs', '--resume', default='',
                     help='previous model pathname. '
-                         'e.g. "models/checkpoint_epoch_11.pt" models/best_qumodel.pt')
+                         'e.g. "/home/yueying/pycharm_workspace/FlowQA/FlowDeltaQA/models/best_model.pt"')
 parser.add_argument('-ro', '--resume_options', action='store_true',
                     help='use previous model options, ignore the cli and defaults.')
 parser.add_argument('-rlr', '--reduce_lr', type=float, default=0.,
@@ -117,6 +118,12 @@ parser.add_argument('--my_dropout_p', type=float, default=0.4)
 parser.add_argument('--dropout_emb', type=float, default=0.4)
 
 parser.add_argument('--max_len', type=int, default=35)
+parser.add_argument('--residual_step', action='store_true', help='use residual step?')
+parser.add_argument('--cof', action='store_true', help='use context of flow?')
+parser.add_argument('--optimize_on_cpu', action='store_true')
+parser.add_argument('--flow_attention', action='store_true', help='use flow attention?')
+parser.add_argument('--use_hoc', action='store_true', help='use history of context?')
+
 
 args = parser.parse_args()
 
@@ -158,6 +165,7 @@ def main():
     if opt['use_elmo'] == False:
         opt['elmo_batch_size'] = 0
     log.info('[Data loaded.]')
+
     if args.resume:
         log.info('[loading previous model...]')
         checkpoint = torch.load(args.resume)
@@ -225,7 +233,7 @@ def main():
         if args.save_best_only:
             if f1 > best_val_score:
                 best_val_score, best_na, best_thresh = f1, na, thresh
-                model_file = os.path.join(model_dir, 'best_qu_model.pt')
+                model_file = os.path.join(model_dir, 'best_model.pt')
                 model.save(model_file, epoch)
                 log.info('[new best model saved.]')
         else:
@@ -246,13 +254,13 @@ def lr_decay(optimizer, lr_decay):
     return optimizer
 
 def load_train_data(opt):
-    with open(os.path.join(args.train_dir, 'train_meta_1.msgpack'), 'rb') as f:
+    with open(os.path.join(args.train_dir, 'train_meta.msgpack'), 'rb') as f:
         meta = msgpack.load(f, encoding='utf8')
     embedding = torch.Tensor(meta['embedding'])
     opt['vocab_size'] = embedding.size(0)
     opt['embedding_dim'] = embedding.size(1)
 
-    with open(os.path.join(args.train_dir, 'train_data_1.msgpack'), 'rb') as f:
+    with open(os.path.join(args.train_dir, 'train_data.msgpack'), 'rb') as f:
         data = msgpack.load(f, encoding='utf8')
     #data_orig = pd.read_csv(os.path.join(args.train_dir, 'train.csv'))
 
@@ -280,12 +288,12 @@ def load_train_data(opt):
     return train, embedding, opt
 
 def load_dev_data(opt): # can be extended to true test set
-    with open(os.path.join(args.dev_dir, 'dev_meta_1.msgpack'), 'rb') as f:
+    with open(os.path.join(args.dev_dir, 'dev_meta.msgpack'), 'rb') as f:
         meta = msgpack.load(f, encoding='utf8')
     embedding = torch.Tensor(meta['embedding'])
     assert opt['embedding_dim'] == embedding.size(1)
 
-    with open(os.path.join(args.dev_dir, 'dev_data_1.msgpack'), 'rb') as f:
+    with open(os.path.join(args.dev_dir, 'dev_data.msgpack'), 'rb') as f:
         data = msgpack.load(f, encoding='utf8')
     #data_orig = pd.read_csv(os.path.join(args.dev_dir, 'dev.csv'))
 
@@ -316,9 +324,8 @@ def load_dev_data(opt): # can be extended to true test set
         if len(dev_answer) <= CID:
             dev_answer.append([])
         dev_answer[CID].append(data['all_answer'][i])
+
     return dev, embedding, dev_answer
-
-
 
 if __name__ == '__main__':
     main()

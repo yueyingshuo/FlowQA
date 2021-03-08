@@ -70,6 +70,9 @@ class QAModel(object):
             answer_s = batch[10].cuda(non_blocking=True)
             answer_e = batch[11].cuda(non_blocking=True)
             answer_c = batch[12].cuda(non_blocking=True)
+            rationale_s = batch[13].cuda(non_blocking=True)
+            rationale_e = batch[14].cuda(non_blocking=True)
+            #answer_id = batch[15].cuda(non_blocking=True)
         else:
             inputs = [e for e in batch[:9]]
             overall_mask = batch[9]
@@ -77,19 +80,24 @@ class QAModel(object):
             answer_s = batch[10]
             answer_e = batch[11]
             answer_c = batch[12]
-
+            rationale_s = batch[13]
+            rationale_e = batch[14]
+            #answer_id = batch[15]
+        #inputs.append(answer_id)
+        
         # Run forward
         # output: [batch_size, question_num, context_len], [batch_size, question_num]
-
-        score_s, score_e, score_no_answ = self.network(*inputs)
+        score_s, score_e, score_c = self.network(*inputs)
 
         # Compute loss and accuracies
         loss = self.opt['elmo_lambda'] * (self.network.elmo.scalar_mix_0.scalar_parameters[0] ** 2
                                         + self.network.elmo.scalar_mix_0.scalar_parameters[1] ** 2
                                         + self.network.elmo.scalar_mix_0.scalar_parameters[2] ** 2) # ELMo L2 regularization
-        all_no_answ = (answer_c == 0)
-        answer_s.masked_fill_(all_no_answ, -100) # ignore_index is -100 in F.cross_entropy
-        answer_e.masked_fill_(all_no_answ, -100)
+        all_no_span = (answer_c != 3)
+        answer_s.masked_fill_(all_no_span, -100) # ignore_index is -100 in F.cross_entropy
+        answer_e.masked_fill_(all_no_span, -100)
+        rationale_s.masked_fill_(all_no_span, -100) # ignore_index is -100 in F.cross_entropy
+        rationale_e.masked_fill_(all_no_span, -100)
 
         for i in range(overall_mask.size(0)):
             q_num = sum(overall_mask[i]) # the true question number for this sampled context
@@ -97,16 +105,16 @@ class QAModel(object):
             target_s = answer_s[i, :q_num] # Size: q_num
             target_e = answer_e[i, :q_num]
             target_c = answer_c[i, :q_num]
-            target_no_answ = all_no_answ[i, :q_num]
+            target_s_r = rationale_s[i, :q_num]
+            target_e_r = rationale_e[i, :q_num]
+            target_no_span = all_no_span[i, :q_num]
 
             # single_loss is averaged across q_num
-            if self.opt['question_normalize']:
-                single_loss = F.binary_cross_entropy_with_logits(score_no_answ[i, :q_num], target_no_answ.float()) * q_num.item() / 8.0
-                single_loss = single_loss + F.cross_entropy(score_s[i, :q_num], target_s) * (q_num - sum(target_no_answ)).item() / 7.0
-                single_loss = single_loss + F.cross_entropy(score_e[i, :q_num], target_e) * (q_num - sum(target_no_answ)).item() / 7.0
-            else:
-                single_loss = F.binary_cross_entropy_with_logits(score_no_answ[i, :q_num], target_no_answ.float()) \
-                            + F.cross_entropy(score_s[i, :q_num], target_s) + F.cross_entropy(score_e[i, :q_num], target_e)
+            single_loss = (F.cross_entropy(score_c[i, :q_num], target_c) * q_num.item() / 15.0
+                         + F.cross_entropy(score_s[i, :q_num], target_s) * (q_num - sum(target_no_span)).item() / 12.0
+                         + F.cross_entropy(score_e[i, :q_num], target_e) * (q_num - sum(target_no_span)).item() / 12.0)
+                         #+ self.opt['rationale_lambda'] * F.cross_entropy(score_s_r[i, :q_num], target_s_r) * (q_num - sum(target_no_span)).item() / 12.0
+                         #+ self.opt['rationale_lambda'] * F.cross_entropy(score_e_r[i, :q_num], target_e_r) * (q_num - sum(target_no_span)).item() / 12.0)
 
             loss = loss + (single_loss / overall_mask.size(0))
         self.train_loss.update(loss.item(), overall_mask.size(0))
@@ -127,7 +135,7 @@ class QAModel(object):
         self.reset_embeddings()
         self.eval_embed_transfer = True
 
-    def predict(self, batch, No_Ans_Threshold=None):
+    def predict(self, batch):
         # Eval mode
         self.network.eval()
         torch.set_grad_enabled(False)
@@ -145,33 +153,36 @@ class QAModel(object):
 
         # Run forward
         # output: [batch_size, question_num, context_len], [batch_size, question_num]
-        score_s, score_e, score_no_answ = self.network(*inputs)
+        score_s, score_e, score_c = self.network(*inputs)
         score_s = F.softmax(score_s, dim=2)
         score_e = F.softmax(score_e, dim=2)
 
         # Transfer to CPU/normal tensors for numpy ops
         score_s = score_s.data.cpu()
         score_e = score_e.data.cpu()
-        score_no_answ = score_no_answ.data.cpu()
+        score_c = score_c.data.cpu()
 
         # Get argmax text spans
-        text = batch[13]
-        spans = batch[14]
+        text = batch[-4]
+        spans = batch[-3]
         overall_mask = batch[9]
 
-        predictions, no_ans_scores = [], []
+        predictions = []
         max_len = self.opt['max_len'] or score_s.size(2)
 
         for i in range(overall_mask.size(0)):
-            dialog_pred, dialog_noans = [], []
-
             for j in range(overall_mask.size(1)):
                 if overall_mask[i, j] == 0: # this dialog has ended
                     break
 
-                dialog_noans.append(score_no_answ[i, j].item())
-                if No_Ans_Threshold is not None and score_no_answ[i, j] > No_Ans_Threshold:
-                    dialog_pred.append("CANNOTANSWER")
+                ans_type = np.argmax(score_c[i, j])
+
+                if ans_type == 0:
+                    predictions.append("unknown")
+                elif ans_type == 1:
+                    predictions.append("Yes")
+                elif ans_type == 2:
+                    predictions.append("No")
                 else:
                     scores = torch.ger(score_s[i, j], score_e[i, j])
                     scores.triu_().tril_(max_len - 1)
@@ -179,12 +190,9 @@ class QAModel(object):
                     s_idx, e_idx = np.unravel_index(np.argmax(scores), scores.shape)
 
                     s_offset, e_offset = spans[i][s_idx][0], spans[i][e_idx][1]
-                    dialog_pred.append(text[i][s_offset:e_offset])
+                    predictions.append(text[i][s_offset:e_offset])
 
-            predictions.append(dialog_pred)
-            no_ans_scores.append(dialog_noans)
-
-        return predictions, no_ans_scores # list of (list of strings), list of (list of floats)
+        return predictions # list of (list of strings)
 
     # allow the evaluation embedding be larger than training embedding
     # this is helpful if we have pretrained word embeddings

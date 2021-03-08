@@ -35,7 +35,7 @@ trn_file = 'CoQA/train.json'
 dev_file = 'CoQA/dev.json'
 wv_file = args.wv_file
 wv_dim = args.wv_dim
-nlp = spacy.load('en', disable=['parser'])
+nlp = spacy.load('en_core_web_sm', disable=['parser'])
 
 random.seed(args.seed)
 np.random.seed(args.seed)

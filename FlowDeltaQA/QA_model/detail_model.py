@@ -50,6 +50,8 @@ class FlowQA(nn.Module):
             que_input_size += CoVe_size
 
         if opt['use_elmo']:
+            # options_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway_5.5B/elmo_2x4096_512_2048cnn_2xhighway_5.5B_options.json"
+            # weight_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway_5.5B/elmo_2x4096_512_2048cnn_2xhighway_5.5B_weights.hdf5"
             options_file = "/home/yueying/pycharm_workspace/FlowQA/elmo_2x4096_512_2048cnn_2xhighway_5.5B_options.json"
             weight_file = "/home/yueying/pycharm_workspace/FlowQA/elmo_2x4096_512_2048cnn_2xhighway_5.5B_weights.hdf5"
             self.elmo = Elmo(options_file, weight_file, 1, dropout=0)
@@ -76,12 +78,25 @@ class FlowQA(nn.Module):
         print('Initially, the vector_sizes [doc, query] are', doc_hidden_size, que_hidden_size)
 
         flow_size = opt['hidden_size']
+        if opt['residual_step']:
+            flow_size = flow_size * 2
 
         # RNN document encoder
         self.doc_rnn1 = layers.StackedBRNN(doc_hidden_size, opt['hidden_size'], num_layers=1)
-        self.dialog_flow1 = layers.StackedBRNN(opt['hidden_size'] * 2, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False)
+        if opt['flow_attention']:
+            self.dialog_flow1 = layers.FlowRNN(opt['hidden_size'] * 2, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False, 
+                                               residual_step=opt['residual_step'],
+                                               cof=opt['cof'])
+        else:
+            self.dialog_flow1 = layers.StackedBRNN(opt['hidden_size'] * 2, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False)
+        
         self.doc_rnn2 = layers.StackedBRNN(opt['hidden_size'] * 2 + flow_size + CoVe_size, opt['hidden_size'], num_layers=1)
-        self.dialog_flow2 = layers.StackedBRNN(opt['hidden_size'] * 2, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False)
+        if opt['flow_attention']:
+            self.dialog_flow2 = layers.FlowRNN(opt['hidden_size'] * 2, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False, 
+                                               residual_step=opt['residual_step'],
+                                               cof=opt['cof'])
+        else:
+            self.dialog_flow2 = layers.StackedBRNN(opt['hidden_size'] * 2, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False)
         doc_hidden_size = opt['hidden_size'] * 2
 
         # RNN question encoder
@@ -95,13 +110,23 @@ class FlowQA(nn.Module):
         self.deep_attn = layers.DeepAttention(opt, abstr_list_cnt=2, deep_att_hidden_size_per_abstr=opt['deep_att_hidden_size_per_abstr'], do_similarity=opt['deep_inter_att_do_similar'], word_hidden_size=embedding_dim+CoVe_size, no_rnn=True)
 
         self.deep_attn_rnn, doc_hidden_size = layers.RNN_from_opt(self.deep_attn.att_final_size + flow_size, opt['hidden_size'], opt, num_layers=1)
-        self.dialog_flow3 = layers.StackedBRNN(doc_hidden_size, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False)
+        if opt['flow_attention']:
+            self.dialog_flow3 = layers.FlowRNN(doc_hidden_size, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False,
+                                               residual_step=opt['residual_step'],
+                                               cof=opt['cof'])
+        else:
+            self.dialog_flow3 = layers.StackedBRNN(doc_hidden_size, opt['hidden_size'], num_layers=1, rnn_type=nn.GRU, bidir=False)
 
         # Question understanding and compression
         self.high_lvl_qrnn, que_hidden_size = layers.RNN_from_opt(que_hidden_size * 2, opt['hidden_size'], opt, num_layers = 1, concat_rnn = True)
 
         # Self attention on context
-        att_size = doc_hidden_size + 2 * opt['hidden_size'] * 2
+        if opt['use_hoc']:
+            att_size = doc_hidden_size + 2 * opt['hidden_size'] * 2 + 2 * opt['hidden_size']
+        elif opt['residual_step']:
+            att_size = doc_hidden_size + 2 * opt['hidden_size'] * 2
+        else:
+            att_size = doc_hidden_size + 2 * opt['hidden_size'] * 2
 
         if opt['self_attention_opt'] > 0:
             self.highlvl_self_att = layers.GetAttentionHiddens(att_size, opt['deep_att_hidden_size_per_abstr'])
@@ -127,7 +152,7 @@ class FlowQA(nn.Module):
         # Store config
         self.opt = opt
 
-    def forward(self, x1, x1_c, x1_f, x1_pos, x1_ner, x1_mask, x2_full, x2_c, x2_full_mask):
+    def forward(self, x1, x1_c, x1_f, x1_pos, x1_ner, x1_mask, x2_full, x2_c, x2_full_mask, x3=None):
         """Inputs:
         x1 = document word indices             [batch * len_d]
         x1_c = document char indices           [batch * len_d * len_w] or [1]
@@ -138,6 +163,7 @@ class FlowQA(nn.Module):
         x2_full = question word indices        [batch * q_num * len_q]
         x2_c = question char indices           [(batch * q_num) * len_q * len_w]
         x2_full_mask = question padding mask   [batch * q_num * len_q]
+        x3 = answer word indices [batch * q_num * len_a]
         """
 
         # precomputing ELMo is only for context (to speedup computation)
@@ -251,32 +277,42 @@ class FlowQA(nn.Module):
         # === Start processing the dialog ===
         # cur_h: [batch_size * max_qa_pair, context_length, hidden_state]
         # flow : fn (rnn)
-        # x1_full: [batch_size, max_qa_pair, context_length]
         def flow_operation(cur_h, flow):
             flow_in = cur_h.transpose(0, 1).view(x1_full.size(2), x1_full.size(0), x1_full.size(1), -1)
             flow_in = flow_in.transpose(0, 2).contiguous().view(x1_full.size(1), x1_full.size(0) * x1_full.size(2), -1).transpose(0, 1)
             # [bsz * context_length, max_qa_pair, hidden_state]
-            flow_out = flow(flow_in)
+            if self.opt['residual_step']:
+                flow_out, residual_out  = flow(flow_in)
+            else:
+                flow_out = flow(flow_in)
             # [bsz * context_length, max_qa_pair, flow_hidden_state_dim (hidden_state/2)]
             if self.opt['no_dialog_flow']:
                 flow_out = flow_out * 0
 
             flow_out = flow_out.transpose(0, 1).view(x1_full.size(1), x1_full.size(0), x1_full.size(2), -1).transpose(0, 2).contiguous()
-            flow_out = flow_out.view(x1_full.size(2), x1_full.size(0) * x1_full.size(1), -1).transpose(0, 1)
             # [bsz * max_qa_pair, context_length, flow_hidden_state_dim]
-            return flow_out
+            flow_out = flow_out.view(x1_full.size(2), x1_full.size(0) * x1_full.size(1), -1).transpose(0, 1)
+            if self.opt['residual_step']:
+                residual_out = residual_out.transpose(0, 1).view(x1_full.size(1), x1_full.size(0), x1_full.size(2), -1).transpose(0, 2).contiguous()
+                residual_out = residual_out.view(x1_full.size(2), x1_full.size(0) * x1_full.size(1), -1).transpose(0, 1)
+                return flow_out, residual_out
+            else:
+                return flow_out, None
 
         # Encode document with RNN
         doc_abstr_ls = []
 
         doc_hiddens = self.doc_rnn1(x1_input, x1_mask)
-        doc_hiddens_flow = flow_operation(doc_hiddens, self.dialog_flow1)
+        doc_hiddens_flow, residual_flow = flow_operation(doc_hiddens, self.dialog_flow1)
 
         doc_abstr_ls.append(doc_hiddens)
+        #doc_hiddens_flow = torch.cat((doc_hiddens_flow, residual_flow), dim=2)
 
         doc_hiddens = self.doc_rnn2(torch.cat((doc_hiddens, doc_hiddens_flow, x1_cove_high_expand), dim=2), x1_mask)
-        doc_hiddens_flow = flow_operation(doc_hiddens, self.dialog_flow2)
+        doc_hiddens_flow, residual_flow = flow_operation(doc_hiddens, self.dialog_flow2)
+        
         doc_abstr_ls.append(doc_hiddens)
+        #doc_hiddens_flow = torch.cat((doc_hiddens_flow, residual_flow), dim=2)
 
         #with open('flow_bef_att.pkl', 'wb') as output:
         #    pickle.dump(doc_hiddens_flow, output, pickle.HIGHEST_PROTOCOL)
@@ -295,12 +331,22 @@ class FlowQA(nn.Module):
         [torch.cat([x2_emb, x2_cove_high], 2)], que_abstr_ls, x1_mask, x2_mask)
 
         doc_hiddens = self.deep_attn_rnn(torch.cat((doc_info, doc_hiddens_flow), dim=2), x1_mask)
-        doc_hiddens_flow = flow_operation(doc_hiddens, self.dialog_flow3)
+        doc_hiddens_flow, residual_flow = flow_operation(doc_hiddens, self.dialog_flow3)
 
         doc_abstr_ls += [doc_hiddens]
+        #doc_hiddens_flow = torch.cat((doc_hiddens_flow, residual_flow), dim=2)
+        #if self.opt['residual_step']:
+            #doc_abstr_ls.append(residual_flow)
 
         # Self Attention Fusion Layer
-        x1_att = torch.cat(doc_abstr_ls, 2)
+        if self.opt['use_hoc']:
+            # handle history of context, considering batch=1
+            x1_att = torch.cat(doc_abstr_ls, 2)
+            hoc = torch.cat((doc_hiddens[0, :, :].unsqueeze(0), 
+                             doc_hiddens[:-1, :, :]), dim=0)
+            x1_att = torch.cat((x1_att, hoc), dim=2)
+        else:
+            x1_att = torch.cat(doc_abstr_ls, 2)
 
         if self.opt['self_attention_opt'] > 0:
             highlvl_self_attn_hiddens = self.highlvl_self_att(x1_att, x1_att, x1_mask, x3=doc_hiddens, drop_diagonal=True)
@@ -323,6 +369,7 @@ class FlowQA(nn.Module):
         all_end_scores = end_scores.view_as(x1_full)         # batch x q_num x len_d
 
         # Get whether there is an answer
+        # doc_hiddens: [bsz * max_qa_pair, context_length, hidden_size] 
         doc_avg_hidden = torch.cat((torch.max(doc_hiddens, dim=1)[0], torch.mean(doc_hiddens, dim=1)), dim=1)
         class_scores = self.ans_type_prediction(doc_avg_hidden, question_avg_hidden)
         all_class_scores = class_scores.view(x1_full.size(0), x1_full.size(1), -1)      # batch x q_num x class_num

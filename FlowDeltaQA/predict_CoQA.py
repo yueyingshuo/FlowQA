@@ -1,4 +1,5 @@
 import re
+import json
 import os
 import sys
 import random
@@ -14,22 +15,21 @@ import msgpack
 import pickle
 import pandas as pd
 import numpy as np
-from QA_model.model_QuAC import QAModel
-from general_utils import score, BatchGen_QuAC, find_best_score_and_thresh
+from QA_model.model_CoQA import QAModel
+from CoQA_eval import CoQAEvaluator
+from general_utils import score, BatchGen_CoQA
 
 parser = argparse.ArgumentParser(
     description='Predict using a Dialog QA model.'
 )
-parser.add_argument('--dev_dir', default='QuAC_data/')
+parser.add_argument('--dev_dir', default='CoQA/')
 
 parser.add_argument('-o', '--output_dir', default='pred_out/')
 parser.add_argument('--number', type=int, default=-1, help='id of the current prediction')
-parser.add_argument('-m', '--model', default='models/best_model.pt',
-                    help='testing model pathname, e.g. "models/best_model.pt"')
+parser.add_argument('-m', '--model', default='',
+                    help='testing model pathname, e.g. "models/checkpoint_epoch_11.pt"')
 
-parser.add_argument('-bs', '--batch_size', type=int, default=4)
-parser.add_argument('--no_ans', type=float, default=0)
-parser.add_argument('--min_f1', type=float, default=0.4)
+parser.add_argument('-bs', '--batch_size', default=1)
 
 parser.add_argument('--show', type=int, default=3)
 parser.add_argument('--seed', type=int, default=1023,
@@ -70,22 +70,17 @@ def main():
     log.info('[program starts.]')
     checkpoint = torch.load(args.model)
     opt = checkpoint['config']
-    opt['task_name'] = 'QuAC'
+    opt['task_name'] = 'CoQA'
     opt['cuda'] = args.cuda
     opt['seed'] = args.seed
-    if opt.get('disperse_flow') is None:
-        opt['disperse_flow'] = False
-    if opt.get('rationale_lambda') is None:
-        opt['rationale_lambda'] = 0.0
-    if opt.get('no_dialog_flow') is None:
-        opt['no_dialog_flow'] = False
     if opt.get('do_hierarchical_query') is None:
         opt['do_hierarchical_query'] = False
     state_dict = checkpoint['state_dict']
     log.info('[model loaded.]')
 
-    test, test_embedding, test_answer = load_dev_data(opt)
+    test, test_embedding = load_dev_data(opt)
     model = QAModel(opt, state_dict = state_dict)
+    CoQAEval = CoQAEvaluator("CoQA/dev.json")
     log.info('[Data loaded.]')
 
     model.setup_eval_embed(test_embedding)
@@ -93,34 +88,47 @@ def main():
     if args.cuda:
         model.cuda()
 
-    batches = BatchGen_QuAC(test, batch_size=args.batch_size, evaluation=True, gpu=args.cuda, dialog_ctx=opt['explicit_dialog_ctx'], use_dialog_act=opt['use_dialog_act'], precompute_elmo=opt['elmo_batch_size'] // args.batch_size)
+    batches = BatchGen_CoQA(test, batch_size=args.batch_size, evaluation=True, gpu=args.cuda, dialog_ctx=opt['explicit_dialog_ctx'], precompute_elmo=16 // args.batch_size)
     sample_idx = random.sample(range(len(batches)), args.show)
 
+    with open("CoQA/dev.json", "r", encoding="utf8") as f:
+        dev_data = json.load(f)
+
+    list_of_ids = []
+    for article in dev_data['data']:
+        id = article["id"]
+        for Qs in article["questions"]:
+            tid = Qs["turn_id"]
+            list_of_ids.append((id, tid))
+
     predictions = []
-    no_ans_scores = []
     for i, batch in enumerate(batches):
-        prediction, noans = model.predict(batch, No_Ans_Threshold=args.no_ans)
+        prediction = model.predict(batch)
         predictions.extend(prediction)
-        no_ans_scores.extend(noans)
 
         if not (i in sample_idx):
             continue
-        
-        print("Context: ", batch[-4][0])
+
+        print("Story: ", batch[-4][0])
         for j in range(len(batch[-2][0])):
             print("Q: ", batch[-2][0][j])
-            print("A: ", prediction[0][j])
-            print("     True A: ", batch[-1][0][j], "| Follow up" if batch[-6][0][j].item() // 10 else "| Don't follow up")
-            print("     Val. A: ", test_answer[args.batch_size * i][j])
+            print("A: ", prediction[j])
+            print("Gold A: ", batch[-1][0][j])
+            print("---")
         print("")
 
+    assert(len(list_of_ids) == len(predictions))
+    official_predictions = []
+    for ids, pred in zip(list_of_ids, predictions):
+        official_predictions.append({
+         "id": ids[0],
+         "turn_id": ids[1],
+         "answer": pred})
+    with open("model_prediction.json", "w", encoding="utf8") as f:
+        json.dump(official_predictions, f)
 
-    pred_out = {'predictions': predictions, 'no_ans_scores': no_ans_scores}
-    with open(args.output, 'wb') as f:
-        pickle.dump(pred_out, f)
-
-    f1, h_f1, HEQ_Q, HEQ_D = score(predictions, test_answer, min_F1=args.min_f1)
-    log.warning("Test F1: {:.2f}, HEQ_Q: {:.2f}, HEQ_D: {:.2f}".format(f1, HEQ_Q, HEQ_D))
+    f1 = CoQAEval.compute_turn_score_seq(predictions)
+    log.warning("Test F1: {:.3f}".format(f1 * 100.0))
 
 def load_dev_data(opt): # can be extended to true test set
     with open(os.path.join(args.dev_dir, 'dev_meta.msgpack'), 'rb') as f:
@@ -131,8 +139,8 @@ def load_dev_data(opt): # can be extended to true test set
     with open(os.path.join(args.dev_dir, 'dev_data.msgpack'), 'rb') as f:
         data = msgpack.load(f, encoding='utf8')
 
-    assert opt['num_features'] == len(data['context_features'][0][0]) + opt['explicit_dialog_ctx'] * (opt['use_dialog_act']*3 + 2)
-    
+    assert opt['num_features'] == len(data['context_features'][0][0]) + opt['explicit_dialog_ctx'] * 3
+
     dev = {'context': list(zip(
                         data['context_ids'],
                         data['context_tags'],
@@ -147,19 +155,15 @@ def load_dev_data(opt): # can be extended to true test set
                         data['context_features'],
                         data['answer_start'],
                         data['answer_end'],
+                        data['rationale_start'],
+                        data['rationale_end'],
                         data['answer_choice'],
                         data['question'],
                         data['answer'],
                         data['question_tokenized']))
           }
-    
-    dev_answer = []
-    for i, CID in enumerate(data['question_CID']):
-        if len(dev_answer) <= CID:
-            dev_answer.append([])
-        dev_answer[CID].append(data['all_answer'][i])
-    
-    return dev, embedding, dev_answer
+
+    return dev, embedding
 
 if __name__ == '__main__':
     main()

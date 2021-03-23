@@ -36,7 +36,8 @@ trn_file = 'QuAC_data/train.json'
 dev_file = 'QuAC_data/dev.json'
 wv_file = args.wv_file
 wv_dim = args.wv_dim
-nlp = spacy.load('en', disable=['parser'])
+nlp = spacy.load('en_core_web_sm', disable=['parser'])
+#nlp = spacy.load('en', disable=['parser'])
 
 random.seed(args.seed)
 np.random.seed(args.seed)
@@ -82,6 +83,7 @@ def proc_train(ith, article):
             else:
                 answer_start, answer_end = -1, -1
             rows.append((ith, question, answer, answer_start, answer_end, answer_choice))
+            break
     return rows, context
 
 train, train_context = flatten_json(trn_file, proc_train)
@@ -238,6 +240,7 @@ def proc_dev(ith, article):
                 ans_ls.append(ans['text'])
             
             rows.append((ith, question, answer, answer_start, answer_end, answer_choice, ans_ls))
+            break
     return rows, context
 
 dev, dev_context = flatten_json(dev_file, proc_dev)

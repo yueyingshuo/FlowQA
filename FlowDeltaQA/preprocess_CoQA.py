@@ -16,7 +16,7 @@ from general_utils import flatten_json, free_text_to_span, normalize_text, build
 parser = argparse.ArgumentParser(
     description='Preprocessing train + dev files, about 15 minutes to run on Servers.'
 )
-parser.add_argument('--wv_file', default='glove/glove.840B.300d.txt',
+parser.add_argument('--wv_file', default='../glove/glove.840B.300d.txt',
                     help='path to word vector file.')
 parser.add_argument('--wv_dim', type=int, default=300,
                     help='word vector dimension.')
@@ -31,11 +31,12 @@ parser.add_argument('--seed', type=int, default=1023,
                     help='random seed for data shuffling, embedding init, etc.')
 
 args = parser.parse_args()
-trn_file = 'CoQA/train.json'
-dev_file = 'CoQA/dev.json'
+trn_file = '../CoQA/train.json'
+dev_file = '../CoQA/dev.json'
 wv_file = args.wv_file
 wv_dim = args.wv_dim
-nlp = spacy.load('en', disable=['parser'])
+nlp = spacy.load('en_core_web_sm', disable=['parser'])
+# nlp = spacy.load('en', disable=['parser'])
 
 random.seed(args.seed)
 np.random.seed(args.seed)
@@ -82,6 +83,7 @@ def proc_train(ith, article):
             q_text = article['answers'][j-1]['input_text'] + " // " + q_text
 
         rows.append((ith, q_text, answer, answer_start, answer_end, rationale, rationale_start, rationale_end, answer_choice))
+        break
     return rows, context
 
 train, train_context = flatten_json(trn_file, proc_train)
@@ -173,7 +175,7 @@ meta = {
     'vocab': tr_vocab,
     'embedding': tr_embedding.tolist()
 }
-with open('CoQA/train_meta.msgpack', 'wb') as f:
+with open('../CoQA/train_meta.msgpack', 'wb') as f:
     msgpack.dump(meta, f)
 
 prev_CID, first_question = -1, []
@@ -202,7 +204,7 @@ result = {
     'context_tokenized': trC_tokens,
     'question_tokenized': trQ_tokens
 }
-with open('CoQA/train_data.msgpack', 'wb') as f:
+with open('../CoQA/train_data.msgpack', 'wb') as f:
     msgpack.dump(result, f)
 
 log.info('saved training to disk.')
@@ -240,6 +242,8 @@ def proc_dev(ith, article):
             q_text = article['answers'][j-1]['input_text'] + " // " + q_text
 
         rows.append((ith, q_text, answer, answer_start, answer_end, rationale, rationale_start, rationale_end, answer_choice))
+        break
+
     return rows, context
 
 dev, dev_context = flatten_json(dev_file, proc_dev)
@@ -319,7 +323,7 @@ meta = {
     'vocab': dev_vocab,
     'embedding': dev_embedding.tolist()
 }
-with open('CoQA/dev_meta.msgpack', 'wb') as f:
+with open('../CoQA/dev_meta.msgpack', 'wb') as f:
     msgpack.dump(meta, f)
 
 prev_CID, first_question = -1, []
@@ -348,7 +352,7 @@ result = {
     'context_tokenized': devC_tokens,
     'question_tokenized': devQ_tokens
 }
-with open('CoQA/dev_data.msgpack', 'wb') as f:
+with open('../CoQA/dev_data.msgpack', 'wb') as f:
     msgpack.dump(result, f)
 
 log.info('saved dev to disk.')

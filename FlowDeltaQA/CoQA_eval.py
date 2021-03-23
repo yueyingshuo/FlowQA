@@ -50,6 +50,7 @@ class CoQAEvaluator():
                     sys.stderr.write("Gold file has duplicate stories: {}".format(source))
                 gold_dict[key] = gold_answers
                 gold_list.append(gold_answers)
+                break
         return gold_dict, gold_list, id_to_source
 
     @staticmethod

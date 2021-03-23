@@ -92,14 +92,16 @@ log.info('train json data flattened.')
 print(train)
 
 trC_iter = (pre_proc(c) for c in train_context)
-#trQ_iter = (pre_proc(q) for q in train.question)
-trQ_iter = (pre_proc(q) for q in train.answer)
+trQ_iter = (pre_proc(q) for q in train.question)
+trA_iter = (pre_proc(a) for a in train.answer)
+# trQ_iter = (pre_proc(q) for q in train.answer)
 trC_docs = [doc for doc in nlp.pipe(trC_iter, batch_size=64, n_threads=args.threads)]
 trQ_docs = [doc for doc in nlp.pipe(trQ_iter, batch_size=64, n_threads=args.threads)]
-
+trA_docs = [doc for doc in nlp.pipe(trA_iter, batch_size=64, n_threads=args.threads)]
 # tokens
 trC_tokens = [[normalize_text(w.text) for w in doc] for doc in trC_docs]
 trQ_tokens = [[normalize_text(w.text) for w in doc] for doc in trQ_docs]
+trA_tokens = [[normalize_text(w.text) for w in doc] for doc in trA_docs]
 trC_unnorm_tokens = [[w.text for w in doc] for doc in trC_docs]
 log.info('All tokens for training are obtained.')
 
@@ -118,19 +120,21 @@ log.info('drop {0}/{1} inconsistent samples.'.format(initial_len - len(train), i
 log.info('answer span for training is generated.')
 
 # features
-trC_tags, trC_ents, trC_features = feature_gen(trC_docs, train.context_idx, trQ_docs, args.no_match)
+trC_tags, trC_ents, trC_features = feature_gen(trC_docs, train.context_idx, trQ_docs,trA_docs, args.no_match)
 log.info('features for training is generated: {}, {}, {}'.format(len(trC_tags), len(trC_ents), len(trC_features)))
 
-def build_train_vocab(questions, contexts): # vocabulary will also be sorted accordingly
+def build_train_vocab(questions, answers,contexts): # vocabulary will also be sorted accordingly
     if args.sort_all:
-        counter = collections.Counter(w for doc in questions + contexts for w in doc)
+        counter = collections.Counter(w for doc in questions + answers+contexts for w in doc)
         vocab = sorted([t for t in counter if t in glove_vocab], key=counter.get, reverse=True)
     else:
         counter_c = collections.Counter(w for doc in contexts for w in doc)
         counter_q = collections.Counter(w for doc in questions for w in doc)
-        counter = counter_c + counter_q
+        counter_a = collections.Counter(w for doc in answers for w in doc)
+        counter = counter_c + counter_q +counter_a
         vocab = sorted([t for t in counter_q if t in glove_vocab], key=counter_q.get, reverse=True)
-        vocab += sorted([t for t in counter_c.keys() - counter_q.keys() if t in glove_vocab],
+        vocab+= sorted([t for t in counter_a if t in glove_vocab], key=counter_a.get, reverse=True)
+        vocab += sorted([t for t in counter_c.keys() - counter_q.keys()-counter_a.keys() if t in glove_vocab],
                         key=counter.get, reverse=True)
     total = sum(counter.values())
     matched = sum(counter[t] for t in vocab)
@@ -143,11 +147,15 @@ def build_train_vocab(questions, contexts): # vocabulary will also be sorted acc
     return vocab
 
 # vocab
-tr_vocab = build_train_vocab(trQ_tokens, trC_tokens)
+tr_vocab = build_train_vocab(trQ_tokens, trA_tokens,trC_tokens)
 trC_ids = token2id(trC_tokens, tr_vocab, unk_id=1)
 trQ_ids = token2id(trQ_tokens, tr_vocab, unk_id=1)
+trA_ids = token2id(trA_tokens, tr_vocab, unk_id=1)
+
 trQ_tokens = [["<S>"] + doc + ["</S>"] for doc in trQ_tokens]
+trA_tokens = [["<S>"] + doc + ["</S>"] for doc in trA_tokens]
 trQ_ids = [[2] + qsent + [3] for qsent in trQ_ids]
+trA_ids = [[2] + asent + [3] for asent in trA_ids]
 print(trQ_ids[:10])
 # tags
 vocab_tag = [''] + list(nlp.tagger.labels)
@@ -195,7 +203,9 @@ result = {
     'answer_end': train.answer_end_token.tolist(),
     'answer_choice': train.answer_choice.tolist(),
     'context_tokenized': trC_tokens,
-    'question_tokenized': trQ_tokens
+    'question_tokenized': trQ_tokens,
+    'answer_tokenized':trA_tokens,
+    'answer_ids':trA_ids,
 }
 with open('QuAC_data/train_data_1.msgpack', 'wb') as f:
     msgpack.dump(result, f)
@@ -249,16 +259,19 @@ log.info('dev json data flattened.')
 print(dev)
 
 devC_iter = (pre_proc(c) for c in dev_context)
-devQ_iter = (pre_proc(q) for q in dev.answer)
-# devQ_iter = (pre_proc(q) for q in dev.question)
+# devQ_iter = (pre_proc(q) for q in dev.answer)
+devQ_iter = (pre_proc(q) for q in dev.question)
+devA_iter = (pre_proc(a) for a in dev.answer)
 devC_docs = [doc for doc in nlp.pipe(
     devC_iter, batch_size=64, n_threads=args.threads)]
 devQ_docs = [doc for doc in nlp.pipe(
     devQ_iter, batch_size=64, n_threads=args.threads)]
-
+devA_docs = [doc for doc in nlp.pipe(
+    devA_iter, batch_size=64, n_threads=args.threads)]
 # tokens
 devC_tokens = [[normalize_text(w.text) for w in doc] for doc in devC_docs]
 devQ_tokens = [[normalize_text(w.text) for w in doc] for doc in devQ_docs]
+devA_tokens = [[normalize_text(w.text) for w in doc] for doc in devA_docs]
 devC_unnorm_tokens = [[w.text for w in doc] for doc in devC_docs]
 log.info('All tokens for dev are obtained.')
 
@@ -278,22 +291,27 @@ log.info('drop {0}/{1} inconsistent samples.'.format(initial_len - len(dev), ini
 log.info('answer span for dev is generated.')
 
 # features
-devC_tags, devC_ents, devC_features = feature_gen(devC_docs, dev.context_idx, devQ_docs, args.no_match)
+devC_tags, devC_ents, devC_features = feature_gen(devC_docs, dev.context_idx, devQ_docs, devA_docs,args.no_match)
 log.info('features for dev is generated: {}, {}, {}'.format(len(devC_tags), len(devC_ents), len(devC_features)))
 
-def build_dev_vocab(questions, contexts): # most vocabulary comes from tr_vocab
+def build_dev_vocab(questions, answers,contexts): # most vocabulary comes from tr_vocab
     existing_vocab = set(tr_vocab)
-    new_vocab = list(set([w for doc in questions + contexts for w in doc if w not in existing_vocab and w in glove_vocab]))
+    new_vocab = list(set([w for doc in questions +answers+ contexts for w in doc if w not in existing_vocab and w in glove_vocab]))
     vocab = tr_vocab + new_vocab
     log.info('train vocab {0}, total vocab {1}'.format(len(tr_vocab), len(vocab)))
     return vocab
 
 # vocab
-dev_vocab = build_dev_vocab(devQ_tokens, devC_tokens) # tr_vocab is a subset of dev_vocab
+dev_vocab = build_dev_vocab(devQ_tokens, devA_tokens,devC_tokens) # tr_vocab is a subset of dev_vocab
 devC_ids = token2id(devC_tokens, dev_vocab, unk_id=1)
 devQ_ids = token2id(devQ_tokens, dev_vocab, unk_id=1)
+devA_ids = token2id(devA_tokens, dev_vocab, unk_id=1)
+
 devQ_tokens = [["<S>"] + doc + ["</S>"] for doc in devQ_tokens]
+devA_tokens = [["<S>"] + doc + ["</S>"] for doc in devA_tokens]
+
 devQ_ids = [[2] + qsent + [3] for qsent in devQ_ids]
+devA_ids = [[2] + asent + [3] for asent in devA_ids]
 print(devQ_ids[:10])
 # tags
 devC_tag_ids = token2id(devC_tags, vocab_tag) # vocab_tag same as training
@@ -339,7 +357,9 @@ result = {
     'answer_choice': dev.answer_choice.tolist(),
     'all_answer': dev.all_answer.tolist(),
     'context_tokenized': devC_tokens,
-    'question_tokenized': devQ_tokens
+    'question_tokenized': devQ_tokens,
+    'answer_tokenized':devA_tokens,
+    'answer_ids':devA_ids,
 }
 with open('QuAC_data/dev_data_1.msgpack', 'wb') as f:
     msgpack.dump(result, f)

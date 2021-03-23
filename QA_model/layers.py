@@ -269,12 +269,13 @@ class GetAttentionHiddens(nn.Module):
         """
         if x3 is None:
             x3 = x2
-
+        #[question_num,context_len,*]
         if scores is None:
             scores = self.scoring(x1, x2)
 
         # Mask padding
         x2_mask = x2_mask.unsqueeze(1).expand_as(scores)
+        #pad的位置给予负无穷的值
         scores.data.masked_fill_(x2_mask.data, -float('inf'))
         if drop_diagonal:
             assert(scores.size(1) == scores.size(2))
@@ -282,9 +283,11 @@ class GetAttentionHiddens(nn.Module):
             scores.data.masked_fill_(diag_mask, -float('inf'))
 
         # Normalize with softmax
+        #[question_num,context_len,*]
         alpha = F.softmax(scores, dim=2)
 
         # Take weighted average
+        # [question_num,context_len,*]
         matched_seq = alpha.bmm(x3)
         if return_scores:
             return matched_seq, scores
@@ -381,9 +384,10 @@ class BilinearSeqAttn(nn.Module):
         y = batch * h2
         x_mask = batch * len
         """
+        #负很多
         x = dropout(x, p=my_dropout_p, training=self.training)
         y = dropout(y, p=my_dropout_p, training=self.training)
-
+        #Wy[bs*q_num,*] xWy[bs*q_num,context_len]
         Wy = self.linear(y) if self.linear is not None else y
         xWy = x.bmm(Wy.unsqueeze(2)).squeeze(2)
         xWy.data.masked_fill_(x_mask.data, -float('inf'))
@@ -405,6 +409,7 @@ class GetSpanStartEnd(nn.Module):
         h0 = batch * h_size
         x_mask = batch * len
         """
+        #计算一个向量和一组向量的注意力
         st_scores = self.attn(x, h0, x_mask)
         # st_scores = batch * len
 
@@ -416,7 +421,7 @@ class GetSpanStartEnd(nn.Module):
             # h1 same size as h0
         else:
             h1 = h0
-
+        #有的值会超过1，比如4点多
         end_scores = self.attn(x, h1, x_mask) if self.attn2 is None else\
                      self.attn2(x, h1, x_mask)
         # end_scores = batch * len

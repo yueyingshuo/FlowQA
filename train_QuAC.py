@@ -45,8 +45,8 @@ parser.add_argument('--cuda', type=bool, default=torch.cuda.is_available(),
                     help='whether to use GPU acceleration.')
 # training
 parser.add_argument('-e', '--epoches', type=int, default=30)
-parser.add_argument('-bs', '--batch_size', type=int, default=1)
-parser.add_argument('-ebs', '--elmo_batch_size', type=int, default=12)
+parser.add_argument('-bs', '--batch_size', type=int, default=3)
+parser.add_argument('-ebs', '--elmo_batch_size', type=int, default=13)
 parser.add_argument('-rs', '--resume', default='',
                     help='previous model pathname. '
                          'e.g. "models/checkpoint_epoch_11.pt" models/best_qumodel.pt')
@@ -104,7 +104,7 @@ parser.add_argument('--no_wemb', dest='use_wemb', action='store_false') # word e
 parser.add_argument('--CoVe_opt', type=int, default=1) # contexualized embedding option
 parser.add_argument('--no_pos', dest='use_pos', action='store_false') # pos tagging
 parser.add_argument('--pos_size', type=int, default=51, help='how many kinds of POS tags.')
-parser.add_argument('--pos_dim', type=int, default=12, help='the embedding dimension for POS tags.')
+parser.add_argument('--pos_dim', type=int, default=14, help='the embedding dimension for POS tags.')
 parser.add_argument('--no_ner', dest='use_ner', action='store_false') # named entity
 parser.add_argument('--ner_size', type=int, default=19, help='how many kinds of named entity tags.')
 parser.add_argument('--ner_dim', type=int, default=8, help='the embedding dimension for named entity tags.')
@@ -267,15 +267,18 @@ def load_train_data(opt):
                         data['1st_question'],
                         data['context_tokenized'])),
              'qa': list(zip(
-                        data['question_CID'],
-                        data['question_ids'],
-                        data['context_features'],
-                        data['answer_start'],
+                        data['question_CID'],#1
+                        data['question_ids'],#2
+                        data['context_features'],#3
+                        data['answer_start'],#4
                         data['answer_end'],
                         data['answer_choice'],
                         data['question'],
                         data['answer'],
-                        data['question_tokenized']))
+                        data['question_tokenized'],
+                        data['answer_ids'],
+                        data['answer_tokenized']
+             ))
             }
     return train, embedding, opt
 
@@ -308,8 +311,10 @@ def load_dev_data(opt): # can be extended to true test set
                         data['answer_choice'],
                         data['question'],
                         data['answer'],
-                        data['question_tokenized']))
-          }
+                        data['question_tokenized'],
+                        data['answer_ids'],
+                        data['answer_tokenized']
+           ))}
 
     dev_answer = []
     for i, CID in enumerate(data['question_CID']):

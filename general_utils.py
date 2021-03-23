@@ -115,28 +115,50 @@ def pre_proc(text):
     text = re.sub('\s+', ' ', text)
     return text
 
-def feature_gen(C_docs, Q_CID, Q_docs, no_match):
+# def feature_gen(C_docs,C_tokens,Q_CID,Q_tokens,A_tokens,no_match):
+#     C_tags = [[w.tag_ for w in doc] for doc in C_docs]
+#     C_ents = [[w.ent_type_ for w in doc] for doc in C_docs]
+#     C_features = []
+#     tmp=0
+#     qa_seq = []
+#     qa_seqs=[]
+#     for question, answer, context_id in zip(Q_tokens, A_tokens, Q_CID):
+#         if context_id==tmp:
+#             qa_seq.append(question+answer)
+#         else:
+#             context = C_docs[context_id]
+#             counter_ = Counter(w.text.lower() for w in context)
+#             total = sum(counter_.values())
+#             term_freq = [counter_[w.text.lower()] / total for w in context]
+#             word_counter = Counter(w.text.lower() for w in qa_seq)
+
+
+
+def feature_gen(C_docs, Q_CID, Q_docs, A_docs,no_match):
     C_tags = [[w.tag_ for w in doc] for doc in C_docs]
     C_ents = [[w.ent_type_ for w in doc] for doc in C_docs]
     C_features = []
+    tmp=0
 
-    for question, context_id in zip(Q_docs, Q_CID):
+    for question,answer,context_id in zip(Q_docs, A_docs,Q_CID):
         context = C_docs[context_id]
-
         counter_ = Counter(w.text.lower() for w in context)
         total = sum(counter_.values())
         term_freq = [counter_[w.text.lower()] / total for w in context]
-
         if no_match:
             C_features.append(list(zip(term_freq)))
         else:
-            question_word = {w.text for w in question}
-            question_lower = {w.text.lower() for w in question}
-            question_lemma = {w.lemma_ if w.lemma_ != '-PRON-' else w.text.lower() for w in question}
-            match_origin = [w.text in question_word for w in context]
-            match_lower = [w.text.lower() in question_lower for w in context]
-            match_lemma = [(w.lemma_ if w.lemma_ != '-PRON-' else w.text.lower()) in question_lemma for w in context]
+            if context_id !=tmp:
+                C_features=C_features[:-1]
+                tmp=context_id
+            answer_word = {w.text for w in answer}
+            answer_lower = {w.text.lower() for w in answer}
+            answer_lemma = {w.lemma_ if w.lemma_ != '-PRON-' else w.text.lower() for w in answer}
+            match_origin = [w.text in answer_word for w in context]
+            match_lower = [w.text.lower() in answer_lower for w in context]
+            match_lemma = [(w.lemma_ if w.lemma_ != '-PRON-' else w.text.lower()) in answer_lemma for w in context]
             C_features.append(list(zip(match_origin, match_lower, match_lemma, term_freq)))
+
 
     return C_tags, C_ents, C_features
 
@@ -442,32 +464,71 @@ class BatchGen_QuAC:
             # Process Questions (number = batch * Qseq)
             qa_data = self.data['qa']
 
-            question_num, question_len = 0, 0
+            question_num, question_len ,answer_len= 0, 0,0
             question_batch = []
+            last_QID=[]
             for first_QID in context_batch[5]:
                 i, question_seq = 0, []
                 while True:
                     if first_QID + i >= len(qa_data) or qa_data[first_QID + i][0] != qa_data[first_QID][0]: # their corresponding context ID is different
+                        last_QID.append(question_seq[-1])
+                        question_seq = question_seq[:-1]
+                        i-=1
                         break
                     question_seq.append(first_QID + i)
                     question_len = max(question_len, len(qa_data[first_QID + i][1]))
+                    answer_len=max(answer_len, len(qa_data[first_QID + i][9]))
+                    # question_seq.append(first_QID)
+                    # question_len=max(question_len,len(qa_data[first_QID][1]))
                     i += 1
+
+
                 question_batch.append(question_seq)
                 question_num = max(question_num, i)
 
             question_id = torch.LongTensor(batch_size, question_num, question_len).fill_(0)
-            question_tokens = []
+            answer_id=torch.LongTensor(batch_size, question_num, answer_len).fill_(0)
+            question_tokens,answer_tokens= [],[]
             for i, q_seq in enumerate(question_batch):
                 for j, id in enumerate(q_seq):
-                    doc = qa_data[id][1]
-                    question_id[i, j, :len(doc)] = torch.LongTensor(doc)
+                    question_doc = qa_data[id][1]
+                    answer_doc=qa_data[id][9]
+                    question_id[i, j, :len(question_doc)] = torch.LongTensor(question_doc)
+                    answer_id[i,j,:len(answer_doc)]=torch.LongTensor(answer_doc)
                     question_tokens.append(qa_data[id][8])
+                    answer_tokens.append(qa_data[id][10])
 
                 for j in range(len(q_seq), question_num):
                     question_id[i, j, :2] = torch.LongTensor([2, 3])
                     question_tokens.append(["<S>", "</S>"])
+                    answer_id[i, j, :2] = torch.LongTensor([2, 3])
+                    answer_tokens.append(["<S>", "</S>"])
 
             question_cid = batch_to_ids(question_tokens)
+            answer_cid=batch_to_ids(answer_tokens)
+            lqa_qlen = max([ len(qa_data[i][1]) for i in last_QID])
+            lqa_alen = max([ len(qa_data[i][9]) for i in last_QID])
+            lqa_qids=torch.LongTensor(batch_size, lqa_qlen).fill_(0)
+            lqa_aids = torch.LongTensor(batch_size, lqa_alen).fill_(0)
+            lqa_ans_s = torch.LongTensor(batch_size).fill_(0)
+            lqa_ans_e = torch.LongTensor(batch_size).fill_(0)
+            lqa_ans_c = torch.LongTensor(batch_size).fill_(0)
+            lqa_qtokens,lqa_atokens=[],[]
+            for i ,id in enumerate(last_QID):
+
+                lqa_qtokens.append(qa_data[id][8])
+                lqa_atokens.append(qa_data[id][10])
+                lqa_ans_s[i], lqa_ans_e[i],lqa_ans_c[i]=qa_data[id][3],qa_data[id][4],qa_data[id][5]
+                select_len = min(len(qa_data[id][1]), lqa_qlen)
+                lqa_qids[i,:select_len]=torch.LongTensor(qa_data[id][1])
+                select_len = min(len(qa_data[id][9]), lqa_alen)
+                lqa_aids[i,:select_len]=torch.LongTensor(qa_data[id][9])
+                # lqa_qlen=max(lqa_qlen,len(lqa_qid))
+                # lqa_alen=max(lqa_alen(lqa_aid))
+                # last_qa.append((lqa_qid,lqa_aid,lqa_qtokens,lqa_atokens,lqa_ans_s,lqa_ans_e,lqa_ans_c))
+            last_qa = (lqa_qids, lqa_aids, lqa_ans_s, lqa_ans_e, lqa_ans_c, lqa_qtokens, lqa_atokens)
+
+
 
             # Process Context-Question Features
             feature_len = len(qa_data[0][2][0])
@@ -516,6 +577,7 @@ class BatchGen_QuAC:
             # Process Masks
             context_mask = torch.eq(context_id, 0)
             question_mask = torch.eq(question_id, 0)
+            answer_mask=torch.eq(answer_id,0)
 
             text = list(context_batch[3]) # raw text
             span = list(context_batch[4]) # character span for each words
@@ -527,16 +589,20 @@ class BatchGen_QuAC:
                 context_ent = context_ent.pin_memory()
                 context_mask = context_mask.pin_memory()
                 question_id = question_id.pin_memory()
+                answer_id=answer_id.pin_memory()
                 question_mask = question_mask.pin_memory()
+                answer_mask=answer_mask.pin_memory()
+
                 answer_s = answer_s.pin_memory()
                 answer_e = answer_e.pin_memory()
                 answer_c = answer_c.pin_memory()
                 overall_mask = overall_mask.pin_memory()
                 context_cid = context_cid.pin_memory()
                 question_cid = question_cid.pin_memory()
+                answer_cid=answer_cid.pin_memory()
 
             yield (context_id, context_cid, context_feature, context_tag, context_ent, context_mask,
-                   question_id, question_cid, question_mask, overall_mask,
+                   question_id, question_cid, question_mask, answer_id,answer_cid,answer_mask,last_qa,overall_mask,
                    answer_s, answer_e, answer_c,
                    text, span, question, answer)
 

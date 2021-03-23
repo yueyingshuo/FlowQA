@@ -64,51 +64,100 @@ class QAModel(object):
 
         # Transfer to GPU
         if self.opt['cuda']:
-            inputs = [e.cuda(non_blocking=True) for e in batch[:9]]
-            overall_mask = batch[9].cuda(non_blocking=True)
+            inputs = [e.cuda(non_blocking=True) for e in batch[:12]]
+            qa=[e.cuda(non_blocking=True) for e in batch[12][:5]]
+            #tokens分别是5，6
+            # question_id = [w[0] for w in batch[12]]
+            # answer_id = [w[1] for w in batch[12]]
+            #
+            # question_len = max(len(w) for w in question_id)
+            # question_input = torch.LongTensor(3, question_len).fill_(0)
+            # for i, doc in enumerate(question_id):
+            #     select_len = min(question_len, len(doc))
+            #     question_input[i, :select_len] = doc
+            #
+            # answer_len = max(len(w) for w in answer_id)
+            # answer_input = torch.LongTensor(3, answer_len).fill_(0)
+            # for i, doc in enumerate(answer_id):
+            #     select_len = min(answer_len, len(doc))
+            #     answer_input[i, :select_len] = doc
 
-            answer_s = batch[10].cuda(non_blocking=True)
-            answer_e = batch[11].cuda(non_blocking=True)
-            answer_c = batch[12].cuda(non_blocking=True)
+
+            # inputs.append(question_input.cuda(non_blocking=True))
+            # inputs.append(answer_input.cuda(non_blocking=True))
+            inputs.append(qa)
+            overall_mask = batch[13].cuda(non_blocking=True)
+
+            answer_s = batch[14].cuda(non_blocking=True)
+            answer_e = batch[15].cuda(non_blocking=True)
+            answer_c = batch[16].cuda(non_blocking=True)
+
+            lq_ans_s=qa[2]
+            lq_ans_e=qa[3]
+            lq_ans_c=qa[4]
         else:
-            inputs = [e for e in batch[:9]]
-            overall_mask = batch[9]
+            inputs = [e for e in batch[:13]]
+            overall_mask = batch[13]
 
-            answer_s = batch[10]
-            answer_e = batch[11]
-            answer_c = batch[12]
+            answer_s = batch[14]
+            answer_e = batch[15]
+            answer_c = batch[16]
 
         # Run forward
         # output: [batch_size, question_num, context_len], [batch_size, question_num]
 
-        score_s, score_e, score_no_answ = self.network(*inputs)
+        # score_s, score_e, score_no_answ = self.network(*inputs)
+        qa_s,qa_e,score_s=self.network(*inputs)
 
         # Compute loss and accuracies
         loss = self.opt['elmo_lambda'] * (self.network.elmo.scalar_mix_0.scalar_parameters[0] ** 2
                                         + self.network.elmo.scalar_mix_0.scalar_parameters[1] ** 2
                                         + self.network.elmo.scalar_mix_0.scalar_parameters[2] ** 2) # ELMo L2 regularization
         all_no_answ = (answer_c == 0)
-        answer_s.masked_fill_(all_no_answ, -100) # ignore_index is -100 in F.cross_entropy
-        answer_e.masked_fill_(all_no_answ, -100)
+        #[3,11]
+        # answer_s.masked_fill_(all_no_answ, -100) # ignore_index is -100 in F.cross_entropy
+        # answer_e.masked_fill_(all_no_answ, -100)
+        #
+        # lq_no_answ = (lq_ans_c == 0)
+        # lq_ans_s.masked_fill_(lq_no_answ, -100)  # ignore_index is -100 in F.cross_entropy
+        # lq_ans_e.masked_fill_(lq_no_answ, -100)
+
 
         for i in range(overall_mask.size(0)):
-            q_num = sum(overall_mask[i]) # the true question number for this sampled context
-
-            target_s = answer_s[i, :q_num] # Size: q_num
-            target_e = answer_e[i, :q_num]
-            target_c = answer_c[i, :q_num]
-            target_no_answ = all_no_answ[i, :q_num]
-
-            # single_loss is averaged across q_num
             if self.opt['question_normalize']:
-                single_loss = F.binary_cross_entropy_with_logits(score_no_answ[i, :q_num], target_no_answ.float()) * q_num.item() / 8.0
-                single_loss = single_loss + F.cross_entropy(score_s[i, :q_num], target_s) * (q_num - sum(target_no_answ)).item() / 7.0
-                single_loss = single_loss + F.cross_entropy(score_e[i, :q_num], target_e) * (q_num - sum(target_no_answ)).item() / 7.0
+                #[3,583] [3]
+                print(qa_s[i])
+                q_num = sum(overall_mask[i])
+                target_s = answer_s[i, :q_num]
+                SS=F.cross_entropy(score_s[i, :q_num], target_s)
+                single_loss = F.cross_entropy(qa_s[i], qa[2][i])*0.5
+                single_loss = single_loss + F.cross_entropy(qa_e[i], qa[3][i])*0.5
             else:
-                single_loss = F.binary_cross_entropy_with_logits(score_no_answ[i, :q_num], target_no_answ.float()) \
-                            + F.cross_entropy(score_s[i, :q_num], target_s) + F.cross_entropy(score_e[i, :q_num], target_e)
+                single_loss = F.cross_entropy(qa_s[i], qa[2]) + F.cross_entropy(qa_e[i][i],qa[3][i])
 
             loss = loss + (single_loss / overall_mask.size(0))
+
+            # q_num = sum(overall_mask[i]) # the true question number for this sampled context
+            # #q_num tensor([   0,   21, -100,   60,  175], device='cuda:0')
+            # target_s = answer_s[i, :q_num] # Size: q_num
+            # target_e = answer_e[i, :q_num]
+            # target_c = answer_c[i, :q_num]
+            # target_no_answ = all_no_answ[i, :q_num]
+            #
+            # # single_loss is averaged across q_num
+            # if self.opt['question_normalize']:
+            #     single_loss = F.binary_cross_entropy_with_logits(score_no_answ[i, :q_num], target_no_answ.float()) * q_num.item() / 8.0
+            #     single_loss = single_loss + F.cross_entropy(score_s[i, :q_num], target_s) * (q_num - sum(target_no_answ)).item() / 7.0
+            #     single_loss = single_loss + F.cross_entropy(score_e[i, :q_num], target_e) * (q_num - sum(target_no_answ)).item() / 7.0
+            # else:
+            #     single_loss = F.binary_cross_entropy_with_logits(score_no_answ[i, :q_num], target_no_answ.float()) \
+            #                 + F.cross_entropy(score_s[i, :q_num], target_s) + F.cross_entropy(score_e[i, :q_num], target_e)
+            #
+            # loss = loss + (single_loss / overall_mask.size(0))
+
+
+
+
         self.train_loss.update(loss.item(), overall_mask.size(0))
 
         # Clear gradients and run backward
@@ -155,9 +204,9 @@ class QAModel(object):
         score_no_answ = score_no_answ.data.cpu()
 
         # Get argmax text spans
-        text = batch[13]
-        spans = batch[14]
-        overall_mask = batch[9]
+        text = batch[17]
+        spans = batch[18]
+        overall_mask = batch[13]
 
         predictions, no_ans_scores = [], []
         max_len = self.opt['max_len'] or score_s.size(2)
